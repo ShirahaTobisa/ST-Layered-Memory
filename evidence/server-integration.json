@@ -1,0 +1,57 @@
+{
+  "date": "2026-09-21T06:00:54.321Z",
+  "baseline": "SillyTavern 1.19.0 / 06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+  "model": "Local fixture only; no real model requests",
+  "results": [
+    {
+      "name": "actual ST plugin loaded with inherited session and CSRF",
+      "pass": true,
+      "version": "0.1.0"
+    },
+    {
+      "name": "40 turns summarized, indexed, and 3 older groups merged",
+      "pass": true,
+      "memories": 43
+    },
+    {
+      "name": "duplicate handoff triggers no repeat model calls",
+      "pass": true
+    },
+    {
+      "name": "original-text search returns source floors",
+      "pass": true,
+      "hits": 5
+    },
+    {
+      "name": "hybrid recall excludes retained recent turns",
+      "pass": true,
+      "hits": 10
+    },
+    {
+      "name": "request-copy replacement preserves preset and recent text",
+      "pass": true,
+      "originalMessages": 81,
+      "outgoingMessages": 57,
+      "usedMemories": 18,
+      "tokenizer": "synthetic test counter, not real model billing"
+    },
+    {
+      "name": "editing one source invalidates dependent merged memory",
+      "pass": true
+    },
+    {
+      "name": "clear and same-source restore keep original snapshot",
+      "pass": true,
+      "restored": 40
+    },
+    {
+      "name": "frontend handoff and authenticated backend agree on revision",
+      "pass": true,
+      "revisionStoredInChatMetadata": true
+    },
+    {
+      "name": "frontend final-request event injects valid memory without changing saved chat",
+      "pass": true
+    }
+  ]
+}

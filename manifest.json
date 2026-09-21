@@ -1,0 +1,12 @@
+{
+  "display_name": "RPH 记忆",
+  "loading_order": 200,
+  "requires": [],
+  "optional": [],
+  "js": "client/index.js",
+  "css": "client/style.css",
+  "generate_interceptor": "rphMemoryInterceptor",
+  "minimum_client_version": "1.19.0",
+  "author": "Mornye",
+  "version": "0.1.0"
+}

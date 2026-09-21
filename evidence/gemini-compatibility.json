@@ -1,0 +1,8 @@
+{
+  "date": "2026-09-21T06:00:53.719Z",
+  "method": "Both real runtime modules with a simulated ST event bus and local response; not browser E2E",
+  "memoryInjectionPreserved": true,
+  "outputReplyUnwrapped": true,
+  "privateMarkerRemoved": true,
+  "incompleteReplyExcludedFromMemory": true
+}

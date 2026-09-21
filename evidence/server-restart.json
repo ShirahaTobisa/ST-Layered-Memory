@@ -1,0 +1,25 @@
+{
+  "date": "2026-09-21T05:52:05.732Z",
+  "actualServerRestart": true,
+  "noFrontendReconnectRequired": true,
+  "beforeRestart": {
+    "revision": "b9b358524a5c348611c05a5fa7486aa615da4a93b30f22660b3ff351fbfe2901",
+    "counts": {
+      "queued": 6,
+      "running": 2
+    },
+    "total": 0,
+    "paused": false,
+    "errors": []
+  },
+  "afterRestart": {
+    "revision": "b9b358524a5c348611c05a5fa7486aa615da4a93b30f22660b3ff351fbfe2901",
+    "counts": {
+      "done": 8
+    },
+    "total": 8,
+    "paused": false,
+    "errors": []
+  },
+  "limitation": "A killed in-flight external request may be repeated; completed stored results are reused."
+}

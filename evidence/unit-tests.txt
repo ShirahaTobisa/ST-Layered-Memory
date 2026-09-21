@@ -1,0 +1,40 @@
+Date: 2026-09-21
+Runtime: Node 22.22.2 on Windows
+Command: node --test --test-reporter=spec test/*.test.js
+Exit code: 0
+
+(node:17460) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ turns preserve speaker identity, adjacent user input, greeting and incomplete exclusion (1.8639ms)
+✔ durable handoff deduplicates retries, applies summaries and preserves raw snapshots (35.6077ms)
+✔ changed/swiped/deleted sources and following context invalidate summaries; stale pages conflict (48.4884ms)
+✔ obsolete model results cannot overwrite edited chat or stopped work (81.1418ms)
+✔ persistent storage failure stops the worker without pretending a summary was saved (36.0687ms)
+✔ server restart requeues in-flight tasks without requiring an open page (71.0753ms)
+✔ five-turn compaction skips empty turns, retains all valid per-turn sources and allows retry (172.2057ms)
+✔ branches reuse exact source/context only; unrelated imports do not inherit memories (52.7785ms)
+✔ embedding failure retains summaries; switching embedding config never resummarizes (52.3749ms)
+✔ separate user stores do not share snapshots, keys, or task results (29.2967ms)
+✔ provider rejects partial summaries, malformed embeddings and invalid model URLs (21.7055ms)
+✔ hybrid retrieval excludes recent source and reranker failure falls back; raw search finds omitted detail (40.5389ms)
+✔ prompt replacement happens on copies with uniform memory budget and leaves preset/tool messages intact (1.8568ms)
+✔ ambiguous text, media and protected messages are never blindly replaced (0.2872ms)
+✔ a repeated old source cannot claim the single matching message left in the final request (0.4084ms)
+(node:10912) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ authenticated HTTP routes isolate users, reject stale mutations and import only verified sources (206.9132ms)
+✔ frontend source IDs and server revision survive reload; stale client never adopts remote revision blindly (30.1643ms)
+✔ unfinished Gemini/tool-stage messages are excluded, and edited replies remain excluded until confirmed (1.6466ms)
+✔ quiet generations do not alter main prompt or finish an ongoing nonstream generation (1.1592ms)
+✔ disabled extension leaves requests alone; backend errors leave original enabled requests intact (1.0121ms)
+✔ chat switch during handoff cannot overwrite new chat metadata or attribute old results to it (1.8559ms)
+✔ ST generation-ended can precede message-received; successful final message still hands off (2.2472ms)
+✔ stream failures stay excluded after lifecycle ends; manual confirmation applies only to current text (1.6215ms)
+ℹ tests 23
+ℹ suites 0
+ℹ pass 23
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 757.4359
