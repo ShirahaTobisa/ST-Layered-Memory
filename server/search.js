@@ -1,14 +1,5 @@
-import MiniSearch from 'minisearch';
 import { vectorSignature } from './providers.js';
-
-const segmenter = new Intl.Segmenter('zh', { granularity: 'word' });
-const tokenize = text => [...segmenter.segment(text.toLowerCase())].filter(s => s.isWordLike).map(s => s.segment);
-export function lexical(documents, query) {
-    if (!documents.length || !query.trim()) return [];
-    const index = new MiniSearch({ fields: ['text'], storeFields: [], tokenize, searchOptions: { combineWith: 'OR', prefix: true } });
-    index.addAll(documents);
-    return index.search(query);
-}
+import { cleanText, floorsFrom, turnsFrom, roleText } from '../shared/model.js';
 
 export function cosine(a, b) {
     if (!a?.length || a.length !== b?.length) return -1;
@@ -17,42 +8,52 @@ export function cosine(a, b) {
     return left && right ? dot / Math.sqrt(left * right) : -1;
 }
 
-export async function recall(store, id, query, excludedIds, providers) {
-    const config = store.config;
-    const excluded = new Set(excludedIds);
-    const memories = store.memories(id).filter(m => m.kind === 'summary' && m.enabled && !m.ids.some(source => excluded.has(source)));
-    const terms = lexical(memories.map(m => ({ id: m.id, text: `${m.userText}\n${m.summary}` })), query).slice(0, 50);
-    const warnings = [], ranks = new Map();
-    const add = (list, why) => list.forEach((r, i) => {
-        const found = ranks.get(r.id) || { id: r.id, score: 0, why: [] };
-        found.score += 1 / (60 + i + 1); found.why.push(why);
-        ranks.set(r.id, found);
-    });
-    add(terms, '关键词');
-    const vectors = memories.filter(m => m.vector && m.vectorSignature === vectorSignature(config));
-    if (vectors.length && query.trim()) {
-        try {
-            const [vector] = await providers.embed(config, [query], undefined, 10000);
-            add(vectors.map(m => ({ id: m.id, score: cosine(vector, m.vector) })).filter(m => m.score >= config.threshold).sort((a, b) => b.score - a.score).slice(0, 50), '向量');
-        } catch { warnings.push('向量检索不可用，本轮使用关键词结果'); }
+export function packEmbedding(vector) {
+    const max = vector.reduce((value, n) => Math.max(value, Math.abs(n)), 0);
+    if (!max) throw new Error('向量模型返回了全零向量');
+    const bytes = Int8Array.from(vector, n => Math.max(-127, Math.min(127, Math.round(n / max * 127))));
+    return { embeddingQ: Buffer.from(bytes.buffer).toString('base64'), embeddingScale: max / 127, embeddingDims: vector.length, embeddingEncoding: 'int8:maxabs:v1' };
+}
+
+export function unpackEmbedding(memory) {
+    if (!memory.embeddingQ) return [];
+    const bytes = Buffer.from(memory.embeddingQ, 'base64');
+    return bytes.length === memory.embeddingDims ? new Int8Array(bytes.buffer, bytes.byteOffset, bytes.length) : [];
+}
+
+export async function recall(store, id, query, providers) {
+    const config = store.config, all = store.memories(id);
+    const disabled = new Set(all.filter(m => m.kind === 'group' && !m.enabled).flatMap(m => m.children));
+    const memories = all.filter(m => m.kind === 'summary' && m.enabled && !disabled.has(m.id) && m.vectorSignature === vectorSignature(config) && unpackEmbedding(m).length);
+    if (!memories.length || !query.trim()) return { memories: [], warnings: [] };
+    try {
+        const [vector] = await providers.embed(config, [query.trim()], undefined, 10000);
+        const found = memories.map(m => ({ ...m, score: cosine(vector, unpackEmbedding(m)), why: ['向量召回'] }))
+            .filter(m => m.score >= 0.48).sort((a, b) => b.score - a.score || a.turn - b.turn).slice(0, 10).sort((a, b) => a.turn - b.turn);
+        return { memories: found, warnings: [] };
+    } catch {
+        return { memories: [], warnings: ['记忆召回失败，本次仍使用总结上下文'] };
     }
-    let selected = [...ranks.values()].sort((a, b) => b.score - a.score).slice(0, 30).map(r => ({ ...memories.find(m => m.id === r.id), ...r }));
-    if (config.rerank.enabled && selected.length) {
-        try {
-            const ranked = await providers.rerank(config, query, selected.map(m => m.summary));
-            selected = ranked.sort((a, b) => b.relevance_score - a.relevance_score).map(r => ({ ...selected[r.index], score: r.relevance_score, why: [...selected[r.index].why, '重排'] }));
-        } catch { warnings.push('重排不可用，本轮保留初选结果'); }
-    }
-    return { memories: selected.slice(0, config.topK).sort((a, b) => a.turn - b.turn), warnings };
 }
 
 export function rawSearch(messages, query, limit = 5) {
-    const docs = messages.filter(m => m.role !== 'system' && !m.blocked).map(m => ({ id: m.id, text: m.text, name: m.name, index: messages.indexOf(m) }));
-    return lexical(docs, query).slice(0, limit).map(hit => {
-        const doc = docs.find(d => d.id === hit.id);
-        const words = tokenize(query);
-        const positions = words.map(word => doc.text.toLowerCase().indexOf(word)).filter(n => n >= 0);
-        const start = Math.max(0, (positions.length ? Math.min(...positions) : 0) - 250);
-        return { id: doc.id, floor: doc.index + 1, name: doc.name, text: doc.text.slice(start, start + 1600), truncated: doc.text.length > 1600 };
-    }).sort((a, b) => a.floor - b.floor);
+    const text = String(query || '').trim().slice(0, 300);
+    const terms = [...new Set([text, ...text.split(/[\s,，、;；|｜/\\]+/u)].filter(Boolean))].slice(0, 12);
+    if (!terms.length) return [];
+    const turns = turnsFrom(messages), turnById = new Map(turns.flatMap(t => t.ids.map(id => [id, t.number])));
+    const results = [];
+    floorsFrom(messages).filter(floor => floor.role !== 'system').forEach((floor, index) => {
+        if (floor.messages.some(m => m.blocked)) return;
+        const original = cleanText(roleText(floor.messages, false)).slice(0, 5000), lower = original.toLowerCase();
+        if (!original || original.startsWith('[角色记忆')) return;
+        const matchedTerms = terms.filter(term => lower.includes(term.toLowerCase()));
+        if (!matchedTerms.length) return;
+        const hit = Math.min(...matchedTerms.map(term => lower.indexOf(term.toLowerCase())));
+        const start = original.length > 1400 ? Math.max(0, hit - 420) : 0;
+        const end = original.length > 1400 ? Math.min(original.length, hit + 900) : original.length;
+        results.push({ id: floor.messages[0].id, floor: index + 1, turn: turnById.get(floor.messages[0].id) || '?', name: floor.messages[0].name || floor.role, role: floor.role,
+            matchedTerms, score: (lower.includes(terms[0].toLowerCase()) ? 100 : 0) + matchedTerms.length,
+            text: `${start ? '...' : ''}${original.slice(start, end).trim()}${end < original.length ? '...' : ''}`, truncated: start > 0 || end < original.length });
+    });
+    return results.sort((a, b) => b.score - a.score || b.floor - a.floor).slice(0, Math.max(5, Math.min(10, Number(limit) || 5))).sort((a, b) => a.floor - b.floor);
 }

@@ -45,4 +45,24 @@ test('authenticated HTTP routes isolate users, reject stale mutations and import
     assert.equal((await call('state', { scope })).data.total, 1);
     assert.equal((await call('import', { ...ref, backup }, 'b')).status, 409);
     const searched = await call('search', { ...ref, query: 'detail' }); assert.equal(searched.data.matches.length, 1);
+
+    const longScope = { actor: 'a', chat: 'long-chat', lineage: 'long-lineage' };
+    const longMessages = Array.from({ length: 31 }, (_, i) => [
+        { id: `long-u${i}`, role: 'user', name: 'user', text: `question ${i}` },
+        { id: `long-a${i}`, role: 'assistant', name: 'character', text: `answer ${i}` },
+    ]).flat();
+    const longSynced = (await call('sync', { scope: longScope, messages: longMessages, revision: null })).data;
+    let longState;
+    for (let i = 0; i < 200; i++) {
+        longState = (await call('state', { scope: longScope })).data;
+        if (longState.groups) break;
+        await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.ok(longState.groups);
+    const longRef = { scope: longScope, revision: longSynced.revision };
+    const longBackup = (await call('export', longRef)).data;
+    const longCount = longBackup.memories.length;
+    await call('clear', longRef);
+    const longRestored = await call('import', { ...longRef, backup: longBackup });
+    assert.equal(longRestored.data.restored, longCount);
 });

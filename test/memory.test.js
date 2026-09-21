@@ -4,10 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Store, scopeId, sourceTurns } from '../server/store.js';
 import { Engine } from '../server/engine.js';
-import { Providers, configure, publicConfig, vectorSignature } from '../server/providers.js';
-import { recall, rawSearch, cosine } from '../server/search.js';
-import { turnsFrom, DEFAULTS } from '../shared/model.js';
-import { buildPrompt } from '../client/prompt.js';
+import { Providers, configure, publicConfig, vectorSignature, summaryMessages, hash } from '../server/providers.js';
+import { recall, rawSearch, cosine, packEmbedding } from '../server/search.js';
+import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt, enhancedMemoryRecallDescription } from '../shared/rph-prompts.js';
+import { turnsFrom, sourceData, DEFAULTS } from '../shared/model.js';
+import { buildPrompt, compressHistory } from '../client/prompt.js';
 
 const scope = { actor: 'character:alice.png', chat: 'story', lineage: 'lineage-a' };
 const config = { summary: { url: 'http://model.local/v1', model: 'summary', key: 'private-test' } };
@@ -31,7 +32,7 @@ async function settle(engine) {
     }
     throw new Error('Engine did not settle');
 }
-const provider = { summarize: async (_, input) => `总结 ${input.kind} ${input.memory.turn}`, embed: async () => [[1, 0, 0]] };
+const provider = { summarize: async (_, input) => `总结 ${input.kind} ${input.memory.turn}`, embed: async (_, texts) => texts.map(() => [1, 0, 0]) };
 
 test('turns preserve speaker identity, adjacent user input, greeting and incomplete exclusion', () => {
     const data = [{ id: 'hello', role: 'assistant', text: '开场' }, ...messages(2)];
@@ -57,12 +58,14 @@ test('durable handoff deduplicates retries, applies summaries and preserves raw 
     assert.equal(calls, 2); assert.deepEqual(store.chat(id).messages.map(m => m.text), original.map(m => m.text));
 });
 
-test('changed/swiped/deleted sources and following context invalidate summaries; stale pages conflict', async t => {
+test('changed/swiped/deleted sources invalidate only their own summaries; stale pages conflict', async t => {
     const { store } = fixture(t), id = scopeId(scope), data = messages(7);
     const first = store.sync(scope, data, null); await settle(new Engine(store, provider));
     data[1].text = '改变剧情'; data[1].swipe = 1;
     const second = store.sync(scope, data, first.revision);
-    assert.equal(store.memories(id).filter(m => m.kind === 'summary').length, 3);
+    assert.equal(store.memories(id).filter(m => m.kind === 'summary').length, 6);
+    await settle(new Engine(store, provider));
+    assert.equal(store.memories(id).filter(m => m.kind === 'summary').length, 7);
     assert.throws(() => store.sync(scope, messages(7), first.revision), error => error.status === 409);
     const oldIds = new Set(data.slice(-2).map(m => m.id));
     store.sync(scope, data.slice(0, -2), second.revision);
@@ -108,6 +111,39 @@ test('server restart requeues in-flight tasks without requiring an open page', a
     resumed.close();
 });
 
+test('v0.1 database upgrade preserves edited summaries, disabled merged memories and a recovery copy', async t => {
+    const { store, filename } = fixture(t), id = scopeId(scope), data = messages(31);
+    data[5].text = '';
+    store.sync(scope, data, null); await settle(new Engine(store, provider));
+    const turns = sourceTurns(store.chat(id).messages);
+    const oldSummaries = store.memories(id).filter(m => m.kind === 'summary').map(memory => {
+        const index = memory.turn - 1, turn = turns[index];
+        const { sourceUserIds, sourceAssistantIds, recipe, ...old } = memory;
+        return { ...old, id: hash(turn.ids), sourceHash: hash(turns.slice(Math.max(0, index - 3), index + 1).map(sourceData)),
+            ...(index === 0 ? { summary: '旧版手动编辑必须保留', edited: true } : {}) };
+    });
+    const oldChildren = oldSummaries.filter(memory => memory.turn <= 5).sort((a, b) => a.turn - b.turn), ids = data.slice(0, 10).map(m => m.id);
+    store.clear(id);
+    for (const memory of oldSummaries) store.put(id, memory);
+    store.put(id, { id: hash(ids), kind: 'group', turn: 1, end: 5, ids, children: oldChildren.map(m => m.id), sourceHash: hash(oldChildren.map(m => [m.id, m.summary, m.enabled])), summary: '旧版合并手动编辑', enabled: false, edited: true });
+    const { version, ...oldConfig } = store.config;
+    store.db.prepare('UPDATE config SET data=? WHERE id=1').run(JSON.stringify(oldConfig));
+    store.close();
+    const upgraded = new Store(filename);
+    const memories = upgraded.memories(id), first = memories.find(m => m.id === turns[0].key), group = memories.find(m => m.kind === 'group');
+    assert.equal(first.summary, '旧版手动编辑必须保留'); assert.equal(first.sourceHash, turns[0].sourceHash);
+    assert.equal(group.summary, '旧版合并手动编辑'); assert.equal(group.enabled, false);
+    assert.ok(group.children.every(key => memories.some(m => m.id === key)));
+    upgraded.pause(id, false); await settle(new Engine(upgraded, { ...provider, summarize: async () => { throw new Error('upgrade must not regenerate saved memories'); } }));
+    assert.equal(upgraded.memories(id).length, 31); assert.equal(upgraded.state(id).counts.error || 0, 0);
+    assert.equal(upgraded.state(id).legacy, 29);
+    const backup = JSON.parse(fs.readFileSync(`${filename}.v1-memory-backup.json`, 'utf8'));
+    assert.equal(backup.chats[0].memories.length, 31);
+    assert.ok(!JSON.stringify(backup).includes('private-test'));
+    upgraded.close();
+    const reopened = new Store(filename); assert.equal(reopened.memories(id).length, 31); reopened.close();
+});
+
 test('five-turn compaction skips empty turns, retains all valid per-turn sources and allows retry', async t => {
     const { store } = fixture(t), data = messages(31), id = scopeId(scope);
     data[5].text = '';
@@ -121,7 +157,7 @@ test('five-turn compaction skips empty turns, retains all valid per-turn sources
     assert.ok(!store.memories(id).some(m => m.id === group.id));
 });
 
-test('branches reuse exact source/context only; unrelated imports do not inherit memories', async t => {
+test('branches reuse exact target sources only; unrelated imports do not inherit memories', async t => {
     const { store } = fixture(t); store.sync(scope, messages(5), null); await settle(new Engine(store, provider));
     const branch = { ...scope, chat: 'branch' };
     store.sync(branch, messages(3), null); assert.equal(store.memories(scopeId(branch)).length, 3);
@@ -151,41 +187,98 @@ test('separate user stores do not share snapshots, keys, or task results', t => 
     assert.equal(publicConfig(a.config).summary.hasKey, true);
 });
 
-test('provider rejects partial summaries, malformed embeddings and invalid model URLs', async () => {
+test('provider accepts any non-empty completion body, rejects malformed embeddings and invalid model URLs', async () => {
     for (const finish of ['length', 'content_filter', undefined]) {
         const p = new Providers(async () => Response.json({ choices: [{ message: { content: '半截' }, finish_reason: finish }] }));
-        await assert.rejects(p.summarize(config, { kind: 'summary', prompt: 'test' }), /未完整/);
+        assert.equal(await p.summarize(config, { kind: 'summary', memory: { turn: 1 }, contextTurns: [{ number: 1, user: '问题', assistant: '回复' }] }), '半截');
     }
+    const empty = new Providers(async () => Response.json({ choices: [{ message: { content: '' } }] }));
+    await assert.rejects(empty.summarize(config, { kind: 'summary', memory: { turn: 1 }, contextTurns: [{ number: 1, user: '问题', assistant: '回复' }] }), /有效正文/);
     const p = new Providers(async () => Response.json({ data: [{ index: 0, embedding: [1, 2] }, { index: 0, embedding: [1, 2] }] }));
     await assert.rejects(p.embed({ embedding: { url: 'http://local/v1', model: 'e' } }, ['a', 'b']), /无效/);
     assert.throws(() => configure({ summary: { url: 'file:///private' } }));
     assert.equal(cosine([1, 0], [1, 0, 0]), -1);
 });
 
-test('hybrid retrieval excludes recent source and reranker failure falls back; raw search finds omitted detail', async t => {
+test('RPH 1.9.5 fixture output matches postprocessed replacement positions', () => {
+    const fixtureData = JSON.parse(fs.readFileSync(path.join('test', 'fixtures', 'rph-1.9.5.json'), 'utf8'));
+    for (const item of fixtureData.cases) {
+        const source = item.chat.map(message => ({ id: message.id, role: message.role, name: message.name, text: message.content }));
+        const summaries = item.memories.map(memory => ({
+            id: memory.id, kind: 'summary', turn: memory.turn, summary: memory.summary,
+            ids: [...memory.sourceUserIds, ...memory.sourceAssistantIds],
+            sourceUserIds: memory.sourceUserIds, sourceAssistantIds: memory.sourceAssistantIds,
+            enabled: memory.enabled
+        }));
+        const groups = item.groups.map(memory => ({
+            id: memory.id, kind: 'group', turn: memory.turnStart, end: memory.turnEnd,
+            summary: memory.summary, enabled: memory.enabled, children: memory.sourceMemories.map(child => child.id),
+            ids: [...memory.sourceUserIds, ...memory.sourceAssistantIds],
+            sourceUserIds: memory.sourceUserIds, sourceAssistantIds: memory.sourceAssistantIds
+        }));
+        const result = compressHistory(
+            item.chat.map(message => ({ role: message.role, content: message.content, id: message.id, name: message.name })),
+            source, { summaries, groups, recall: [] }, item.keep
+        ).messages.map(({ id, name, __rphSourceIds, _sourceIndexes, _preventContextMerge, ...message }) => message);
+        assert.deepEqual(result, item.expected, item.name);
+    }
+});
+
+test('summary prompts and nonzero vector encoding match the fixed RPH source', () => {
+    const fixtureData = JSON.parse(fs.readFileSync(path.join('test', 'fixtures', 'rph-1.9.5.json'), 'utf8'));
+    const names = { userName: '用户', characterName: '角色' };
+    assert.equal(buildClassicSummarySystemPrompt(names), fixtureData.prompts.single);
+    assert.equal(buildClassicSummaryFinalInstruction(4), fixtureData.prompts.final);
+    assert.equal(buildClassicSecondarySummaryPrompt({ ...names, startTurn: 1, endTurn: 5 }), fixtureData.prompts.group);
+    assert.deepEqual(enhancedMemoryRecallDescription, fixtureData.prompts.recall);
+    const request = summaryMessages({ kind: 'summary', names, memory: { turn: 4 }, contextTurns: [1, 2, 3, 4].map(number => ({ number, user: '问题', assistant: '回复' })) });
+    assert.equal(request.length, 10);
+    assert.match(request[1].content, /历史背景.*第 1 轮/);
+    assert.match(request[7].content, /唯一总结目标.*第 4 轮/);
+    assert.equal(request.at(-1).content, fixtureData.prompts.final);
+    for (const { vector, expected } of fixtureData.quantization.filter(item => item.vector.some(n => n !== 0))) assert.deepEqual(packEmbedding(vector), expected);
+});
+
+test('unknown sources and protected user attachments cannot be removed by a grouped memory', () => {
+    const source = messages(3), history = source.map(m => ({ id: m.id, role: m.role, content: m.text }));
+    source[0].protected = true;
+    const group = { id: 'g', turn: 1, end: 2, summary: '合并', sourceAssistantIds: ['a0', 'a1'], children: [] };
+    const result = compressHistory(history, source, { groups: [group] }, 2, true);
+    assert.deepEqual(result.messages.slice(0, 2), history.slice(0, 2));
+    const unknown = [...history.slice(0, 2), { role: 'assistant', content: '插件追加说明' }, ...history.slice(2)];
+    const summary = { id: 's', turn: 1, summary: '不可替换', sourceAssistantIds: ['a0'] };
+    assert.deepEqual(compressHistory(unknown, source, { summaries: [summary] }, 2, true).messages, unknown);
+    assert.deepEqual(compressHistory(history.map(({ id, ...m }) => m), source, { summaries: [{ ...summary, sourceAssistantIds: undefined }] }, 2, true).used, []);
+});
+
+test('RPH retrieval includes recent memories and falls back to summaries on vector failure; raw search finds omitted detail', async t => {
     const { store } = fixture(t), id = scopeId(scope), data = messages(3);
     data[1].text += '遗失钥匙藏在灯塔';
-    store.setConfig({ mode: 'enhanced', rerank: { enabled: true } });
+    store.setConfig({ mode: 'enhanced', embedding: { url: 'http://model.local/v1', model: 'embedding' } });
     store.sync(scope, data, null); await settle(new Engine(store, provider));
     const memories = store.memories(id);
     store.edit(id, memories[0].id, { summary: '约好明天去灯塔' });
     store.edit(id, memories[1].id, { summary: '灯塔的风很大' });
-    const result = await recall(store, id, '灯塔', memories[1].ids, { rerank: async () => { throw new Error('failure'); } });
-    assert.equal(result.memories.length, 1); assert.ok(result.warnings.length);
+    await settle(new Engine(store, provider));
+    const result = await recall(store, id, '灯塔', provider);
+    assert.equal(result.memories.length, 3); assert.equal(result.memories.at(-1).turn, 3);
+    const failed = await recall(store, id, '灯塔', { embed: async () => { throw new Error('failure'); } });
+    assert.equal(failed.memories.length, 0); assert.ok(failed.warnings.length);
     assert.match(rawSearch(store.chat(id).messages, '钥匙')[0].text, /钥匙藏在灯塔/);
 });
 
-test('prompt replacement happens on copies with uniform memory budget and leaves preset/tool messages intact', async () => {
+test('prompt replacement has no independent memory cap and leaves preset/tool messages intact', async () => {
     const source = messages(3), turns = sourceTurns(source);
     const summaries = turns.map(t => ({ id: t.key, kind: 'summary', turn: t.number, ids: t.ids, summary: `短总结 ${t.number}` }));
     const input = [{ role: 'system', content: '世界书与作者注释' }, ...source.map(m => ({ role: m.role, content: m.text })), { role: 'assistant', tool_calls: [{ id: 'tool-id' }], content: null }, { role: 'tool', tool_call_id: 'tool-id', content: 'result' }];
     const original = structuredClone(input);
     const result = await buildPrompt(input, source, [], { summaries, groups: [], recall: [] }, { ...DEFAULTS, keep: 2 }, async text => text.length, 10000);
-    assert.equal(result.used.length, 2); assert.deepEqual(input, original);
+    assert.equal(result.used.length, 3); assert.deepEqual(input, original);
     assert.equal(result.messages[0].content, '世界书与作者注释'); assert.equal(result.messages.at(-1).tool_call_id, 'tool-id');
-    assert.equal(result.messages.at(-3).content, source.at(-1).text);
+    assert.equal(result.messages.at(-3).content, '短总结 3');
     const tiny = await buildPrompt(input, source, [], { summaries, groups: [], recall: [] }, { ...DEFAULTS, keep: 2, budget: 1 }, async text => text.length, 10000);
-    assert.deepEqual(tiny.messages, input); assert.equal(tiny.used.length, 0);
+    assert.deepEqual(tiny.messages, result.messages); assert.equal(tiny.used.length, 3);
+    await assert.rejects(buildPrompt(input, source, [], { summaries, groups: [], recall: [] }, { ...DEFAULTS, keep: 2 }, async text => text.length, 1), /超过当前上下文/);
 });
 
 test('ambiguous text, media and protected messages are never blindly replaced', async () => {

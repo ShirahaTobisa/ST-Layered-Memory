@@ -1,40 +1,197 @@
-Date: 2026-09-21
-Runtime: Node 22.22.2 on Windows
-Command: node --test --test-reporter=spec test/*.test.js
-Exit code: 0
+> st-rph-memory@0.2.0 test
+> node --test test/*.test.js
 
-(node:17460) ExperimentalWarning: SQLite is an experimental feature and might change at any time
-(Use `node --trace-warnings ...` to show where the warning was created)
-✔ turns preserve speaker identity, adjacent user input, greeting and incomplete exclusion (1.8639ms)
-✔ durable handoff deduplicates retries, applies summaries and preserves raw snapshots (35.6077ms)
-✔ changed/swiped/deleted sources and following context invalidate summaries; stale pages conflict (48.4884ms)
-✔ obsolete model results cannot overwrite edited chat or stopped work (81.1418ms)
-✔ persistent storage failure stops the worker without pretending a summary was saved (36.0687ms)
-✔ server restart requeues in-flight tasks without requiring an open page (71.0753ms)
-✔ five-turn compaction skips empty turns, retains all valid per-turn sources and allows retry (172.2057ms)
-✔ branches reuse exact source/context only; unrelated imports do not inherit memories (52.7785ms)
-✔ embedding failure retains summaries; switching embedding config never resummarizes (52.3749ms)
-✔ separate user stores do not share snapshots, keys, or task results (29.2967ms)
-✔ provider rejects partial summaries, malformed embeddings and invalid model URLs (21.7055ms)
-✔ hybrid retrieval excludes recent source and reranker failure falls back; raw search finds omitted detail (40.5389ms)
-✔ prompt replacement happens on copies with uniform memory budget and leaves preset/tool messages intact (1.8568ms)
-✔ ambiguous text, media and protected messages are never blindly replaced (0.2872ms)
-✔ a repeated old source cannot claim the single matching message left in the final request (0.4084ms)
-(node:10912) ExperimentalWarning: SQLite is an experimental feature and might change at any time
-(Use `node --trace-warnings ...` to show where the warning was created)
-✔ authenticated HTTP routes isolate users, reject stale mutations and import only verified sources (206.9132ms)
-✔ frontend source IDs and server revision survive reload; stale client never adopts remote revision blindly (30.1643ms)
-✔ unfinished Gemini/tool-stage messages are excluded, and edited replies remain excluded until confirmed (1.6466ms)
-✔ quiet generations do not alter main prompt or finish an ongoing nonstream generation (1.1592ms)
-✔ disabled extension leaves requests alone; backend errors leave original enabled requests intact (1.0121ms)
-✔ chat switch during handoff cannot overwrite new chat metadata or attribute old results to it (1.8559ms)
-✔ ST generation-ended can precede message-received; successful final message still hands off (2.2472ms)
-✔ stream failures stay excluded after lifecycle ends; manual confirmation applies only to current text (1.6215ms)
-ℹ tests 23
-ℹ suites 0
-ℹ pass 23
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 757.4359
+TAP version 13
+# (node:18416) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: turns preserve speaker identity, adjacent user input, greeting and incomplete exclusion
+ok 1 - turns preserve speaker identity, adjacent user input, greeting and incomplete exclusion
+  ---
+  duration_ms: 9.4456
+  type: 'test'
+  ...
+# Subtest: durable handoff deduplicates retries, applies summaries and preserves raw snapshots
+ok 2 - durable handoff deduplicates retries, applies summaries and preserves raw snapshots
+  ---
+  duration_ms: 84.3004
+  type: 'test'
+  ...
+# Subtest: changed/swiped/deleted sources invalidate only their own summaries; stale pages conflict
+ok 3 - changed/swiped/deleted sources invalidate only their own summaries; stale pages conflict
+  ---
+  duration_ms: 91.0329
+  type: 'test'
+  ...
+# Subtest: obsolete model results cannot overwrite edited chat or stopped work
+ok 4 - obsolete model results cannot overwrite edited chat or stopped work
+  ---
+  duration_ms: 108.6434
+  type: 'test'
+  ...
+# Subtest: persistent storage failure stops the worker without pretending a summary was saved
+ok 5 - persistent storage failure stops the worker without pretending a summary was saved
+  ---
+  duration_ms: 33.5114
+  type: 'test'
+  ...
+# Subtest: server restart requeues in-flight tasks without requiring an open page
+ok 6 - server restart requeues in-flight tasks without requiring an open page
+  ---
+  duration_ms: 61.3051
+  type: 'test'
+  ...
+# Subtest: v0.1 database upgrade preserves edited summaries, disabled merged memories and a recovery copy
+ok 7 - v0.1 database upgrade preserves edited summaries, disabled merged memories and a recovery copy
+  ---
+  duration_ms: 350.56
+  type: 'test'
+  ...
+# Subtest: five-turn compaction skips empty turns, retains all valid per-turn sources and allows retry
+ok 8 - five-turn compaction skips empty turns, retains all valid per-turn sources and allows retry
+  ---
+  duration_ms: 273.6357
+  type: 'test'
+  ...
+# Subtest: branches reuse exact target sources only; unrelated imports do not inherit memories
+ok 9 - branches reuse exact target sources only; unrelated imports do not inherit memories
+  ---
+  duration_ms: 47.6812
+  type: 'test'
+  ...
+# Subtest: embedding failure retains summaries; switching embedding config never resummarizes
+ok 10 - embedding failure retains summaries; switching embedding config never resummarizes
+  ---
+  duration_ms: 54.3691
+  type: 'test'
+  ...
+# Subtest: separate user stores do not share snapshots, keys, or task results
+ok 11 - separate user stores do not share snapshots, keys, or task results
+  ---
+  duration_ms: 66.6581
+  type: 'test'
+  ...
+# Subtest: provider accepts any non-empty completion body, rejects malformed embeddings and invalid model URLs
+ok 12 - provider accepts any non-empty completion body, rejects malformed embeddings and invalid model URLs
+  ---
+  duration_ms: 44.9069
+  type: 'test'
+  ...
+# Subtest: RPH 1.9.5 fixture output matches postprocessed replacement positions
+ok 13 - RPH 1.9.5 fixture output matches postprocessed replacement positions
+  ---
+  duration_ms: 25.2593
+  type: 'test'
+  ...
+# Subtest: summary prompts and nonzero vector encoding match the fixed RPH source
+ok 14 - summary prompts and nonzero vector encoding match the fixed RPH source
+  ---
+  duration_ms: 3.7052
+  type: 'test'
+  ...
+# Subtest: unknown sources and protected user attachments cannot be removed by a grouped memory
+ok 15 - unknown sources and protected user attachments cannot be removed by a grouped memory
+  ---
+  duration_ms: 1.0201
+  type: 'test'
+  ...
+# Subtest: RPH retrieval includes recent memories and falls back to summaries on vector failure; raw search finds omitted detail
+ok 16 - RPH retrieval includes recent memories and falls back to summaries on vector failure; raw search finds omitted detail
+  ---
+  duration_ms: 108.5873
+  type: 'test'
+  ...
+# Subtest: prompt replacement has no independent memory cap and leaves preset/tool messages intact
+ok 17 - prompt replacement has no independent memory cap and leaves preset/tool messages intact
+  ---
+  duration_ms: 2.0752
+  type: 'test'
+  ...
+# Subtest: ambiguous text, media and protected messages are never blindly replaced
+ok 18 - ambiguous text, media and protected messages are never blindly replaced
+  ---
+  duration_ms: 0.3766
+  type: 'test'
+  ...
+# Subtest: a repeated old source cannot claim the single matching message left in the final request
+ok 19 - a repeated old source cannot claim the single matching message left in the final request
+  ---
+  duration_ms: 0.3144
+  type: 'test'
+  ...
+# (node:19844) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: authenticated HTTP routes isolate users, reject stale mutations and import only verified sources
+ok 20 - authenticated HTTP routes isolate users, reject stale mutations and import only verified sources
+  ---
+  duration_ms: 630.1061
+  type: 'test'
+  ...
+# Subtest: frontend source IDs and server revision survive reload; stale client never adopts remote revision blindly
+ok 21 - frontend source IDs and server revision survive reload; stale client never adopts remote revision blindly
+  ---
+  duration_ms: 58.7345
+  type: 'test'
+  ...
+# Subtest: unfinished Gemini/tool-stage messages are excluded, and edited replies remain excluded until confirmed
+ok 22 - unfinished Gemini/tool-stage messages are excluded, and edited replies remain excluded until confirmed
+  ---
+  duration_ms: 7.2805
+  type: 'test'
+  ...
+# Subtest: quiet generations do not alter main prompt or finish an ongoing nonstream generation
+ok 23 - quiet generations do not alter main prompt or finish an ongoing nonstream generation
+  ---
+  duration_ms: 3.2455
+  type: 'test'
+  ...
+# Subtest: disabled extension leaves requests alone; backend errors leave original enabled requests intact
+ok 24 - disabled extension leaves requests alone; backend errors leave original enabled requests intact
+  ---
+  duration_ms: 1.8817
+  type: 'test'
+  ...
+# Subtest: chat switch during handoff cannot overwrite new chat metadata or attribute old results to it
+ok 25 - chat switch during handoff cannot overwrite new chat metadata or attribute old results to it
+  ---
+  duration_ms: 4.4405
+  type: 'test'
+  ...
+# Subtest: ST generation-ended can precede message-received; successful final message still hands off
+ok 26 - ST generation-ended can precede message-received; successful final message still hands off
+  ---
+  duration_ms: 14.4495
+  type: 'test'
+  ...
+# Subtest: stream failures stay excluded after lifecycle ends; manual confirmation applies only to current text
+ok 27 - stream failures stay excluded after lifecycle ends; manual confirmation applies only to current text
+  ---
+  duration_ms: 4.2182
+  type: 'test'
+  ...
+# Subtest: chat-specific switches persist independently and pause handed-off work
+ok 28 - chat-specific switches persist independently and pause handed-off work
+  ---
+  duration_ms: 6.5976
+  type: 'test'
+  ...
+# Subtest: ST history hook compresses before prompt budgeting while preserving WI input and recent speaker/media metadata
+ok 29 - ST history hook compresses before prompt budgeting while preserving WI input and recent speaker/media metadata
+  ---
+  duration_ms: 13.0732
+  type: 'test'
+  ...
+# Subtest: settings panel exposes Anima-style model, rules, memory and context controls
+ok 30 - settings panel exposes Anima-style model, rules, memory and context controls
+  ---
+  duration_ms: 330.2079
+  type: 'test'
+  ...
+1..30
+# tests 30
+# suites 0
+# pass 30
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2221.2635

@@ -1,12 +1,12 @@
 {
-  "date": "2026-09-21T06:00:54.321Z",
+  "date": "2026-09-21T12:32:29.046Z",
   "baseline": "SillyTavern 1.19.0 / 06bde939fb1e9c4c8d8641d810f0a916b5bce127",
   "model": "Local fixture only; no real model requests",
   "results": [
     {
       "name": "actual ST plugin loaded with inherited session and CSRF",
       "pass": true,
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "name": "40 turns summarized, indexed, and 3 older groups merged",
@@ -23,7 +23,7 @@
       "hits": 5
     },
     {
-      "name": "hybrid recall excludes retained recent turns",
+      "name": "enhanced recall uses the RPH threshold and limit",
       "pass": true,
       "hits": 10
     },
@@ -32,7 +32,7 @@
       "pass": true,
       "originalMessages": 81,
       "outgoingMessages": 57,
-      "usedMemories": 18,
+      "usedMemories": 28,
       "tokenizer": "synthetic test counter, not real model billing"
     },
     {
@@ -42,7 +42,7 @@
     {
       "name": "clear and same-source restore keep original snapshot",
       "pass": true,
-      "restored": 40
+      "restored": 43
     },
     {
       "name": "frontend handoff and authenticated backend agree on revision",

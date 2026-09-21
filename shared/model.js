@@ -1,36 +1,56 @@
 export const KEY = 'rph_memory';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
-    mode: 'classic', keep: 20, topK: 10, threshold: 0.48, budget: 2048, concurrency: 2,
-    summary: { url: '', model: '', key: '', maxTokens: 700 },
-    embedding: { url: '', model: '', key: '', dimensions: 0 },
-    rerank: { url: '', model: '', key: '', enabled: false },
+    version: 2, mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5,
+    summary: { url: '', model: '', key: '' },
+    embedding: { url: '', model: '', key: '' },
 };
 
 export function cleanText(text) {
-    return String(text || '').replace(/<(think|thinking)>[\s\S]*?(?:<\/\1>|$)/gi, '').replace(/<!--[^]*?-->/g, '').trim();
+    return String(text || '').replace(/<(think|thinking|cot|analysis)>[\s\S]*?(?:<\/\1>|$)/gi, '')
+        .replace(/<next_response>[\s\S]*?(?:<\/next_response>|$)/gi, '')
+        .replace(/<ui_template_state_context>[\s\S]*?(?:<\/ui_template_state_context>|$)/gi, '')
+        .replace(/<ui_template_updates>[\s\S]*?(?:<\/ui_template_updates>|$)/gi, '').trim();
 }
 
-export function turnsFrom(messages) {
-    const turns = [];
-    let current = null;
-    const flush = () => { if (current?.assistant.length) turns.push(current); };
+export function floorsFrom(messages) {
+    const floors = [];
     for (const message of messages) {
-        if (message.role === 'system') continue;
-        if (message.role === 'user') {
-            if (current?.assistant.length) { flush(); current = null; }
-            current ??= { user: [], assistant: [] };
-            current.user.push(message);
-        } else if (current && message.role === 'assistant') current.assistant.push(message);
+        if (message.role === 'system') { floors.push({ role: 'system', messages: [message], barrier: true }); continue; }
+        const last = floors.at(-1);
+        if (last?.role === message.role && !last.barrier && !last.preventMerge && !message.preventMerge) last.messages.push(message);
+        else floors.push({ role: message.role, messages: [message], preventMerge: !!message.preventMerge });
     }
-    flush();
+    return floors;
+}
+
+export const roleText = (messages, clean = true) => {
+    const names = new Set(messages.map(m => m.name).filter(Boolean));
+    return messages.map(m => `${names.size > 1 ? `${m.name || m.role}：` : ''}${clean ? cleanText(m.text) : m.text || ''}`).filter(Boolean).join('\n\n');
+};
+
+export function turnsFrom(messages) {
+    const floors = floorsFrom(messages);
+    const turns = [];
+    let pendingUser = null;
+    for (const floor of floors) {
+        if (floor.role === 'system') { pendingUser = null; continue; }
+        if (floor.role === 'user') {
+            pendingUser = floor;
+            continue;
+        }
+        if (floor.role !== 'assistant' || !pendingUser) continue;
+        turns.push({ user: pendingUser.messages, assistant: floor.messages });
+        pendingUser = null;
+    }
     return turns.map((turn, index) => {
         const all = [...turn.user, ...turn.assistant];
         return {
             ...turn, number: index + 1, ids: all.map(m => m.id),
+            userIds: turn.user.map(m => m.id), assistantIds: turn.assistant.map(m => m.id),
             eligible: turn.assistant.every(m => !m.blocked),
             empty: turn.assistant.every(m => !cleanText(m.text)),
-            text: all.map(m => `${m.name || m.role}: ${cleanText(m.text)}`).join('\n'),
+            text: roleText(all),
         };
     });
 }
@@ -41,12 +61,16 @@ export function sourceData(turn) {
 
 export function eligibleGroups(turns, memories) {
     const groups = [];
-    for (let i = 0; i + 5 <= turns.length - 25; i += 5) {
-        const subset = turns.slice(i, i + 5);
-        if (subset.some(t => !t.eligible)) continue;
-        const children = subset.filter(t => !t.empty).map(t => memories.get(t.key));
-        if (children.length < 2 || children.some(m => !m?.enabled)) continue;
-        groups.push({ start: i + 1, end: i + 5, children, ids: subset.flatMap(t => t.ids) });
+    const limit = Math.max(0, turns.length - 25);
+    for (let start = 0; start + 5 <= limit; start += 5) {
+        const subset = turns.slice(start, start + 5);
+        const children = subset.flatMap(turn => {
+            if (!turn.eligible || turn.empty) return [];
+            return [memories.get(turn.key)].filter(Boolean);
+        });
+        const complete = subset.every(turn => turn.empty || memories.has(turn.key));
+        if (!complete || children.length < 2) continue;
+        groups.push({ start: children[0].turn, end: children.at(-1).turn, children, ids: children.flatMap(m => m.ids || []) });
     }
     return groups;
 }

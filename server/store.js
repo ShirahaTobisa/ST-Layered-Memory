@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Database } from './database.js';
-import { DEFAULTS, turnsFrom, sourceData, eligibleGroups } from '../shared/model.js';
+import { DEFAULTS, turnsFrom, sourceData, eligibleGroups, roleText } from '../shared/model.js';
 import { configure, hash, summarySignature, vectorSignature } from './providers.js';
 
 const parse = row => row ? JSON.parse(row.data) : null;
@@ -12,9 +12,11 @@ export function scopeId(scope) {
 
 export function sourceTurns(messages) {
     const turns = turnsFrom(messages);
-    for (const [index, turn] of turns.entries()) {
-        turn.key = hash(turn.ids);
-        turn.sourceHash = hash(turns.slice(Math.max(0, index - 3), index + 1).map(sourceData));
+    for (const turn of turns) {
+        turn.key = hash(turn.assistantIds.length ? turn.assistantIds : turn.ids);
+        // RPH binds a summary to the target turn's source messages. Earlier
+        // turns are prompt context and do not invalidate an existing summary.
+        turn.sourceHash = hash(sourceData(turn));
     }
     return turns;
 }
@@ -31,12 +33,47 @@ export class Store {
             CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE, kind TEXT NOT NULL, status TEXT NOT NULL, input TEXT NOT NULL, lease TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 0);
             CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
         `);
-        this.config = configure(parse(this.db.prepare('SELECT data FROM config WHERE id=1').get()) || {}, DEFAULTS);
+        const savedConfig = parse(this.db.prepare('SELECT data FROM config WHERE id=1').get()) || {};
+        this.config = configure(savedConfig, DEFAULTS);
+        if (savedConfig.version !== 2) this.migrateLegacy(filename);
         this.db.prepare("UPDATE jobs SET status='queued', lease=NULL WHERE status='running'").run();
         for (const row of this.db.prepare('SELECT id FROM chats WHERE paused=0').all()) this.schedule(row.id);
     }
 
     close() { this.db.close(); }
+    migrateLegacy(filename) {
+        const chats = this.db.prepare('SELECT id FROM chats').all().map(({ id }) => ({ ...this.chat(id), memories: this.memories(id) }));
+        const backup = `${filename}.v1-memory-backup.json`;
+        if (chats.some(chat => chat.memories.length) && !fs.existsSync(backup)) {
+            fs.writeFileSync(backup, JSON.stringify({ version: 1, chats: chats.map(chat => ({ scope: chat.scope, revision: chat.revision, memories: chat.memories })) }), { mode: 0o600, flag: 'wx' });
+        }
+        this.db.transaction(() => {
+            for (const chat of chats) {
+                const turns = sourceTurns(chat.messages), targets = new Map(turns.map(turn => [hash(turn.ids), turn]));
+                // v0.1 ignored system boundaries and hashed the preceding three turns.
+                const previousTurns = sourceTurns(chat.messages.filter(message => message.role !== 'system'));
+                const previous = new Map(previousTurns.map((turn, index) => [hash(turn.ids), hash(previousTurns.slice(Math.max(0, index - 3), index + 1).map(sourceData))]));
+                const migrated = new Map(), originals = new Map(chat.memories.map(memory => [memory.id, memory]));
+                for (const memory of chat.memories.filter(memory => memory.kind === 'summary')) {
+                    const turn = targets.get(memory.id);
+                    if (!turn?.eligible || previous.get(memory.id) !== memory.sourceHash) continue;
+                    const next = { ...memory, id: turn.key, ids: turn.ids, turn: turn.number, sourceHash: turn.sourceHash,
+                        sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, userText: roleText(turn.user, false), recipe: 'legacy-v1' };
+                    this.remove(chat.id, memory.id); this.put(chat.id, next); migrated.set(memory.id, next);
+                }
+                for (const memory of chat.memories.filter(memory => memory.kind === 'group')) {
+                    const oldChildren = memory.children.map(id => originals.get(id)), children = memory.children.map(id => migrated.get(id));
+                    if (children.some(child => !child) || oldChildren.some(child => !child) || hash(oldChildren.map(child => [child.id, child.summary, child.enabled])) !== memory.sourceHash) continue;
+                    const ids = children.flatMap(child => child.ids);
+                    this.remove(chat.id, memory.id);
+                    this.put(chat.id, { ...memory, id: hash(ids), ids, children: children.map(child => child.id),
+                        sourceHash: hash(children.map(child => [child.id, child.summary, child.enabled])), recipe: 'legacy-v1',
+                        sourceUserIds: children.flatMap(child => child.sourceUserIds), sourceAssistantIds: children.flatMap(child => child.sourceAssistantIds) });
+                }
+            }
+            this.db.prepare('INSERT OR REPLACE INTO config VALUES (1,?)').run(JSON.stringify(this.config));
+        })();
+    }
     chat(id) {
         const row = this.db.prepare('SELECT * FROM chats WHERE id=?').get(id);
         return row ? { ...row, scope: JSON.parse(row.scope), messages: JSON.parse(row.snapshot) } : null;
@@ -100,7 +137,9 @@ export class Store {
         if (this.config.summary.url && this.config.summary.model) for (const [index, turn] of turns.entries()) {
             if (!validTurns.has(turn.key) || summaries.has(turn.key)) continue;
             jobs.push({ kind: 'summary', key: turn.key, sourceHash: turn.sourceHash, config: summarySignature(this.config),
-                memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceHash: turn.sourceHash, userText: turn.user.map(m => `${m.name}: ${m.text}`).join('\n'), enabled: true },
+                memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: roleText(turn.user, false), enabled: true, recipe: 'rph-1.9.5' },
+                names: { userName: turn.user[0]?.name, characterName: turn.assistant[0]?.name },
+                contextTurns: turns.slice(Math.max(0, index - 3), index + 1).map(t => ({ number: t.number, user: roleText(t.user), assistant: roleText(t.assistant) })),
                 prompt: `背景（只供理解）：\n${turns.slice(Math.max(0, index - 3), index).map(t => t.text).join('\n\n')}\n\n目标轮次：\n${turn.text}` });
         }
         const groups = eligibleGroups(turns, summaries).map(group => ({ ...group, key: hash(group.ids), sourceHash: hash(group.children.map(m => [m.id, m.summary, m.enabled])) }));
@@ -109,8 +148,8 @@ export class Store {
             const group = groups.find(g => g.key === memory.id && g.sourceHash === memory.sourceHash);
             if (!group) this.remove(id, memory.id);
             else {
-                if (memory.turn !== group.start || memory.end !== group.end) {
-                    memory.turn = group.start; memory.end = group.end; this.put(id, memory);
+                if (memory.turn !== group.children[0].turn || memory.end !== group.children.at(-1).turn) {
+                    memory.turn = group.children[0].turn; memory.end = group.children.at(-1).turn; this.put(id, memory);
                 }
                 currentGroups.set(memory.id, memory);
             }
@@ -118,12 +157,13 @@ export class Store {
         if (this.config.summary.url && this.config.summary.model) for (const group of groups) {
             if (currentGroups.has(group.key)) continue;
             jobs.push({ kind: 'group', key: group.key, sourceHash: group.sourceHash, config: summarySignature(this.config),
-                memory: { id: group.key, kind: 'group', turn: group.start, end: group.end, ids: group.ids, children: group.children.map(m => m.id), sourceHash: group.sourceHash, enabled: true },
-                prompt: group.children.map(m => `第 ${m.turn} 轮：${m.summary}`).join('\n\n') });
+                memory: { id: group.key, kind: 'group', turn: group.start, end: group.end, ids: group.ids, sourceUserIds: [...new Set(group.children.flatMap(m => m.sourceUserIds || []))], sourceAssistantIds: [...new Set(group.children.flatMap(m => m.sourceAssistantIds || []))], children: group.children.map(m => m.id), sourceHash: group.sourceHash, enabled: true, recipe: 'rph-1.9.5' },
+                names: { userName: turns.at(-1)?.user[0]?.name, characterName: turns.at(-1)?.assistant[0]?.name },
+                prompt: group.children.map(m => `【第 ${m.turn} 轮】\n${m.summary}`).join('\n\n') });
         }
         if (this.config.mode === 'enhanced' && this.config.embedding.url && this.config.embedding.model) for (const memory of summaries.values()) {
             if (!memory.enabled || memory.vectorSignature === vectorSignature(this.config)) continue;
-            jobs.push({ kind: 'embedding', key: memory.id, sourceHash: hash(memory.summary), config: vectorSignature(this.config), prompt: `用户原输入：\n${memory.userText}\n本轮总结：\n${memory.summary}` });
+            jobs.push({ kind: 'embedding', key: memory.id, sourceHash: hash(memory.summary), config: vectorSignature(this.config), prompt: `用户原输入：\n${memory.userText}\n\n本轮总结：\n${memory.summary}` });
         }
         const wanted = new Set(jobs.map(j => hash([id, j.kind, j.key, j.sourceHash, j.config])));
         for (const job of this.db.prepare("SELECT id FROM jobs WHERE chat_id=? AND status IN ('queued','running','error')").all(id)) {
@@ -141,7 +181,11 @@ export class Store {
         const chat = this.chat(id);
         if (!chat) return { revision: null, counts: {}, total: 0, paused: false };
         const counts = Object.fromEntries(this.db.prepare('SELECT status,count(*) AS n FROM jobs WHERE chat_id=? GROUP BY status').all(id).map(r => [r.status, r.n]));
-        return { revision: chat.revision, counts, total: this.memories(id).length, paused: !!chat.paused,
+        const memories = this.memories(id), summaries = memories.filter(m => m.kind === 'summary');
+        return { revision: chat.revision, counts, total: memories.length, paused: !!chat.paused,
+            summaries: summaries.length, groups: memories.length - summaries.length,
+            indexed: summaries.filter(m => m.embeddingQ && m.vectorSignature === vectorSignature(this.config)).length,
+            legacy: summaries.filter(m => m.recipe !== 'rph-1.9.5' && !m.edited).length,
             errors: this.db.prepare("SELECT id,kind,error FROM jobs WHERE chat_id=? AND status='error' LIMIT 10").all(id) };
     }
 
@@ -166,7 +210,9 @@ export class Store {
         if (!memory) throw new Error('记忆已失效，请刷新');
         if (input.summary !== undefined) {
             if (typeof input.summary !== 'string' || !input.summary.trim() || input.summary.length > 20000) throw new Error('记忆正文无效');
-            memory.summary = input.summary.trim(); memory.vector = null; memory.vectorSignature = null; memory.edited = true;
+            memory.summary = input.summary.trim();
+            for (const key of ['vector', 'embeddingQ', 'embeddingScale', 'embeddingDims', 'embeddingEncoding', 'vectorSignature']) delete memory[key];
+            memory.edited = true;
         }
         if (input.enabled !== undefined) memory.enabled = !!input.enabled;
         this.db.transaction(() => { this.put(id, memory); this.schedule(id); })();

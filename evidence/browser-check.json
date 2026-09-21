@@ -1,0 +1,17 @@
+{
+  "date": "2026-09-21T12:28:50.293Z",
+  "browser": "151.0.7922.34",
+  "baseline": "actual SillyTavern 1.19.0",
+  "model": "local mock only",
+  "phone": "viewport emulation, not a physical phone",
+  "checks": [
+    "actual ST frontend loaded; both model lists and API test buttons work",
+    "settings saved and enabled; real HTTP backend generated 40 summaries and 3 merged memories",
+    "download, clear and file restore preserve all 43 per-turn and merged records",
+    "memory editor and enable/disable controls persist their changes",
+    "real ST main generation sends merged/individual summaries, recent original text and recall while retaining saved raw chat",
+    "context preview works; all four sections fit a 390×844 viewport and can be switched"
+  ],
+  "pageErrors": [],
+  "outgoingMessages": 59
+}
