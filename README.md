@@ -1,8 +1,8 @@
 # RPH 记忆
 
-独立 SillyTavern 扩展，版本 0.2.0。酒馆前端负责设置、交付聊天及注入记忆；酒馆服务器插件负责总结、合并、索引、检索和持久任务。记忆处理按 RP-Hub 1.9.5 的两级总结流程实现，设置界面参考 Anima 的前后端分工。
+独立 SillyTavern 扩展，版本 0.2.0。酒馆前端负责设置、交付聊天及注入记忆；酒馆服务器插件负责总结、合并、索引、检索和持久任务。记忆处理采用两级总结流程，设置界面参考 Anima 的前后端分工。
 
-这是 **0.2.0**。完整行为见 [SPEC.md](SPEC.md)，验证结果和仍需实测的项目见 [ACCEPTANCE.md](ACCEPTANCE.md)。已通过固定 RP-Hub 1.9.5 源码对照、真实酒馆 1.19.0 的浏览器操作及主生成流程验证。模型接口使用本地模拟服务；真实模型的记忆效果和手机真机仍待验收。
+这是 **0.2.0**。完整行为见 [SPEC.md](SPEC.md)，验证结果和仍需实测的项目见 [ACCEPTANCE.md](ACCEPTANCE.md)。已通过真实酒馆 1.19.0 的浏览器操作及主生成流程验证。模型接口使用本地模拟服务；真实模型的记忆效果和手机真机仍待验收。
 
 ![记忆设置](https://raw.githubusercontent.com/ShirahaTobisa/ST-RPH-Memory/main/evidence/settings-desktop.png)
 
