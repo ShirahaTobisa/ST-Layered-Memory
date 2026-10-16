@@ -1,10 +1,10 @@
-# RPH 记忆
+# 分层记忆
 
 独立 SillyTavern 扩展，版本 0.2.0。酒馆前端负责设置、交付聊天及注入记忆；酒馆服务器插件负责总结、合并、索引、检索和持久任务。记忆处理采用两级总结流程，设置界面参考 Anima 的前后端分工。
 
 这是 **0.2.0**。完整行为见 [SPEC.md](SPEC.md)，验证结果和仍需实测的项目见 [ACCEPTANCE.md](ACCEPTANCE.md)。已通过真实酒馆 1.19.0 的浏览器操作及主生成流程验证。模型接口使用本地模拟服务；真实模型的记忆效果和手机真机仍待验收。
 
-![记忆设置](https://raw.githubusercontent.com/ShirahaTobisa/ST-RPH-Memory/main/evidence/settings-desktop.png)
+![记忆设置](https://raw.githubusercontent.com/ShirahaTobisa/ST-Layered-Memory/main/evidence/settings-desktop.png)
 
 ## 安装
 
@@ -17,8 +17,8 @@
 先停止酒馆，在服务器的 **SillyTavern 根目录**（有 `config.yaml`、`server.js` 的目录）打开终端，运行：
 
 ```sh
-git clone https://github.com/ShirahaTobisa/ST-RPH-Memory.git plugins/ST-RPH-Memory
-npm --prefix plugins/ST-RPH-Memory ci --omit=dev
+git clone https://github.com/ShirahaTobisa/ST-Layered-Memory.git plugins/ST-Layered-Memory
+npm --prefix plugins/ST-Layered-Memory ci --omit=dev
 ```
 
 Windows、Linux 和 Termux 都使用上述命令。Docker 用户应在实际运行酒馆的环境中执行，并确保插件目录随容器持久保存。
@@ -30,37 +30,37 @@ enableServerPlugins: true
 enableServerPluginsAutoUpdate: false
 ```
 
-第二项关闭后端插件自动更新，方便前后端一起手动更新。然后重新启动酒馆。后端入口应位于 `plugins/ST-RPH-Memory/package.json`；无需另开端口、编译 SQLite 或启动独立数据库。Node 22 可能显示 SQLite 的 `ExperimentalWarning`，这条提示本身不表示安装失败。
+第二项关闭后端插件自动更新，方便前后端一起手动更新。然后重新启动酒馆。后端入口应位于 `plugins/ST-Layered-Memory/package.json`；无需另开端口、编译 SQLite 或启动独立数据库。Node 22 可能显示 SQLite 的 `ExperimentalWarning`，这条提示本身不表示安装失败。
 
 ### 2. 安装前端扩展
 
 打开酒馆的“扩展程序 → 安装扩展程序”，粘贴仓库地址：
 
 ```text
-https://github.com/ShirahaTobisa/ST-RPH-Memory
+https://github.com/ShirahaTobisa/ST-Layered-Memory
 ```
 
 安装后刷新页面。前端会由酒馆放入当前用户或全局的扩展目录，无需再手动复制一份。**本版不需要酒馆助手或 Extras**，也不需要修改酒馆核心源码；服务器插件通过酒馆原生服务器插件接口运行。
 
 ### 3. 配置并启用
 
-在“扩展程序 → RPH 记忆”填写总结模型的接口、模型名和 API Key，先用“基础模式”保存设置。打开聊天后勾选“启用记忆”；前端默认关闭。增强模式见下方“模型配置”。
+在“扩展程序 → 分层记忆”填写总结模型的接口、模型名和 API Key，先用“基础模式”保存设置。打开聊天后勾选“启用记忆”；前端默认关闭。增强模式见下方“模型配置”。
 
 若显示后端不可用，检查后端目录、依赖安装结果、`enableServerPlugins` 和酒馆启动日志，再点击面板中的重新连接按钮。仅安装前端不足以运行后台记忆任务，但不会阻塞聊天。
 
 ### 离线安装包
 
-[v0.2.0 Release](https://github.com/ShirahaTobisa/ST-RPH-Memory/releases/tag/v0.2.0) 提供前端、服务器插件、SHA-256 和文件清单。将包内 `frontend/ST-RPH-Memory` 放入酒馆 `public/scripts/extensions/third-party/`，将 `server/ST-RPH-Memory` 放入 `plugins/`，然后按上面的步骤安装后端依赖、修改配置并重启。
+[v0.2.0 Release](https://github.com/ShirahaTobisa/ST-Layered-Memory/releases/tag/v0.2.0) 提供前端、服务器插件、SHA-256 和文件清单。将包内 `frontend/ST-Layered-Memory` 放入酒馆 `public/scripts/extensions/third-party/`，将 `server/ST-Layered-Memory` 放入 `plugins/`，然后按上面的步骤安装后端依赖、修改配置并重启。
 
 离线安装不会自动获得 Git 更新；切换到仓库安装前，先停止酒馆，将旧前后端插件目录移出酒馆目录，再按上面的步骤安装。记忆数据库位于用户数据目录，无需删除。
 
 ## 更新
 
-**前端和后端要一起更新。** 先停止生成，在酒馆扩展管理中更新“RPH 记忆”；完成后停止酒馆，在 SillyTavern 根目录运行：
+**前端和后端要一起更新。** 先停止生成，在酒馆扩展管理中更新“分层记忆”；完成后停止酒馆，在 SillyTavern 根目录运行：
 
 ```sh
-git -C plugins/ST-RPH-Memory pull --ff-only
-npm --prefix plugins/ST-RPH-Memory ci --omit=dev
+git -C plugins/ST-Layered-Memory pull --ff-only
+npm --prefix plugins/ST-Layered-Memory ci --omit=dev
 ```
 
 重新启动酒馆，再刷新网页。只更新前端不会更新服务器插件；更新后端后也需要重新安装依赖。更新前的备份方式见下方“备份与卸载”。
@@ -85,7 +85,7 @@ npm --prefix plugins/ST-RPH-Memory ci --omit=dev
 
 编辑、换候选、删除或导入后，来源不符的总结不再参与上下文。分支仅复用目标轮消息身份、内容及状态完全匹配的逐轮总结；之前三轮仅作总结背景，单独改变背景不会使目标轮总结失效。不同登录用户的数据各自存储；不同角色、群组和聊天分别处理。重复交付同一内容不重新生成已有总结。
 
-消息来源 UUID 保存在 `extra.rph_memory`，聊天谱系和已交付版本保存在聊天元数据；不会替换聊天正文或持久隐藏旧消息。来源版本冲突时拒绝覆盖，需重新加载聊天后再同步。不要在多个旧页面中轮流保存同一份聊天。
+消息来源 UUID 保存在 `extra.layered_memory`（旧消息里的 `rph_memory` 自动沿用），聊天谱系和已交付版本保存在聊天元数据；不会替换聊天正文或持久隐藏旧消息。来源版本冲突时拒绝覆盖，需重新加载聊天后再同步。不要在多个旧页面中轮流保存同一份聊天。
 
 当前每次同步交付完整快照，单次最多 20000 条、单条最多 200000 字符，并受酒馆自身 HTTP 请求大小限制。还未完成超长聊天的耗时、内存和传输量验收；不宣称支持任意规模。
 
@@ -97,15 +97,15 @@ npm --prefix plugins/ST-RPH-Memory ci --omit=dev
 
 本版注入支持酒馆的 Chat Completion 主聊天，后台静默生成和 AI 帮答旁路；Text Completion 请求不做上下文替换。本版不负责生成图片描述。
 
-“允许模型检索聊天原文”默认关闭。开启后注册 `rph_memory_search`，查询当前聊天已交付原文，返回原楼层和命中附近片段。仍需酒馆及模型本身支持工具调用；与关键词搜索总结不同，它可找出总结遗漏的原话。
+“允许模型检索聊天原文”默认关闭。开启后注册 `layered_memory_search`，查询当前聊天已交付原文，返回原楼层和命中附近片段。仍需酒馆及模型本身支持工具调用；与关键词搜索总结不同，它可找出总结遗漏的原话。
 
 可与独立 Gemini 抗截断插件共用：未完成、取消、手动编辑后尚未确认的回复和真实工具阶段不会自动记入。没有抗截断插件时，也记录接收到的取消和流式失败；对于接口声称成功但语义上没写完的正文，本版无法自动判断。确认修订后的最后一条回复完整时，可使用“确认最后回复可记忆”。确认只对该候选当前正文有效。
 
 ## 备份与卸载
 
-数据库：`data/<酒馆用户>/rph-memory/memory.sqlite`，WAL 文件可能与其并存。完整备份请先停止酒馆再复制整个 `rph-memory` 目录，包含密钥和任务。界面导出的 JSON 仅含记忆与来源，不含模型配置、密钥和向量。
+数据库：`data/<酒馆用户>/layered-memory/memory.sqlite`，WAL 文件可能与其并存。完整备份请先停止酒馆再复制整个 `layered-memory` 目录，包含密钥和任务。界面导出的 JSON 仅含记忆与来源，不含模型配置、密钥和向量。
 
-JSON 恢复只接受同聊天、同快照版本且来源匹配的逐轮和合并总结；不会把陌生聊天或旧 RPH 数据直接绑定到当前聊天。向量可以补录重建。
+JSON 恢复只接受同聊天、同快照版本且来源匹配的逐轮和合并总结；不会把陌生聊天或旧版数据直接绑定到当前聊天。向量可以补录重建。
 
 “启用记忆”按聊天保存；从 0.1.0 升级时，尚未单独设置的聊天沿用旧开关。关闭后停止本聊天任务并旁路后续注入；服务器断线时仍能关闭本地注入，并提示后台停止尚未确认。其他聊天已交付的任务仍可运行。完全停用请停止酒馆，移出前端与后端两个目录，再重启。历史正文保留，数据库不会随移除插件删除。清空记忆会停止当前聊天补录，不删除聊天原文；“补录及重试”可重新建立。
 
@@ -113,4 +113,4 @@ JSON 恢复只接受同聊天、同快照版本且来源匹配的逐轮和合并
 
 在完整源码目录运行 `npm ci`、`npm test`，精简安装包不包含开发测试。源码分为 `client/`、`server/` 和 `shared/`，数据库与任务代码不依赖浏览器；SQLite 使用 Node 内置接口。
 
-参考 [RP-Hub](https://github.com/STA1N156/RP-Hub) 与 [anima-rag](https://github.com/Ellinav/anima-rag)。来源、固定提交和许可见 [NOTICE.md](NOTICE.md)。本项目使用 CC BY-NC 4.0，保留上游出处。
+设置界面的前后端分工参考 [anima-rag](https://github.com/Ellinav/anima-rag)。许可见 [NOTICE.md](NOTICE.md)，本项目使用 CC BY-NC 4.0。

@@ -1,11 +1,11 @@
 {
-  "display_name": "RPH 记忆",
+  "display_name": "分层记忆",
   "loading_order": 200,
   "requires": [],
   "optional": [],
   "js": "client/index.js",
   "css": "client/style.css",
-  "generate_interceptor": "rphMemoryInterceptor",
+  "generate_interceptor": "layeredMemoryInterceptor",
   "minimum_client_version": "1.19.0",
   "author": "Mornye",
   "version": "0.2.0"

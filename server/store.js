@@ -14,7 +14,7 @@ export function sourceTurns(messages) {
     const turns = turnsFrom(messages);
     for (const turn of turns) {
         turn.key = hash(turn.assistantIds.length ? turn.assistantIds : turn.ids);
-        // RPH binds a summary to the target turn's source messages. Earlier
+        // A summary is bound to the target turn's source messages. Earlier
         // turns are prompt context and do not invalidate an existing summary.
         turn.sourceHash = hash(sourceData(turn));
     }
@@ -137,7 +137,7 @@ export class Store {
         if (this.config.summary.url && this.config.summary.model) for (const [index, turn] of turns.entries()) {
             if (!validTurns.has(turn.key) || summaries.has(turn.key)) continue;
             jobs.push({ kind: 'summary', key: turn.key, sourceHash: turn.sourceHash, config: summarySignature(this.config),
-                memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: roleText(turn.user, false), enabled: true, recipe: 'rph-1.9.5' },
+                memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: roleText(turn.user, false), enabled: true, recipe: 'lm-1.9.5' },
                 names: { userName: turn.user[0]?.name, characterName: turn.assistant[0]?.name },
                 contextTurns: turns.slice(Math.max(0, index - 3), index + 1).map(t => ({ number: t.number, user: roleText(t.user), assistant: roleText(t.assistant) })),
                 prompt: `背景（只供理解）：\n${turns.slice(Math.max(0, index - 3), index).map(t => t.text).join('\n\n')}\n\n目标轮次：\n${turn.text}` });
@@ -157,7 +157,7 @@ export class Store {
         if (this.config.summary.url && this.config.summary.model) for (const group of groups) {
             if (currentGroups.has(group.key)) continue;
             jobs.push({ kind: 'group', key: group.key, sourceHash: group.sourceHash, config: summarySignature(this.config),
-                memory: { id: group.key, kind: 'group', turn: group.start, end: group.end, ids: group.ids, sourceUserIds: [...new Set(group.children.flatMap(m => m.sourceUserIds || []))], sourceAssistantIds: [...new Set(group.children.flatMap(m => m.sourceAssistantIds || []))], children: group.children.map(m => m.id), sourceHash: group.sourceHash, enabled: true, recipe: 'rph-1.9.5' },
+                memory: { id: group.key, kind: 'group', turn: group.start, end: group.end, ids: group.ids, sourceUserIds: [...new Set(group.children.flatMap(m => m.sourceUserIds || []))], sourceAssistantIds: [...new Set(group.children.flatMap(m => m.sourceAssistantIds || []))], children: group.children.map(m => m.id), sourceHash: group.sourceHash, enabled: true, recipe: 'lm-1.9.5' },
                 names: { userName: turns.at(-1)?.user[0]?.name, characterName: turns.at(-1)?.assistant[0]?.name },
                 prompt: group.children.map(m => `【第 ${m.turn} 轮】\n${m.summary}`).join('\n\n') });
         }
@@ -185,7 +185,7 @@ export class Store {
         return { revision: chat.revision, counts, total: memories.length, paused: !!chat.paused,
             summaries: summaries.length, groups: memories.length - summaries.length,
             indexed: summaries.filter(m => m.embeddingQ && m.vectorSignature === vectorSignature(this.config)).length,
-            legacy: summaries.filter(m => m.recipe !== 'rph-1.9.5' && !m.edited).length,
+            legacy: summaries.filter(m => m.recipe !== 'lm-1.9.5' && !m.edited).length,
             errors: this.db.prepare("SELECT id,kind,error FROM jobs WHERE chat_id=? AND status='error' LIMIT 10").all(id) };
     }
 

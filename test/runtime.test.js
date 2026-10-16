@@ -139,7 +139,7 @@ test('ST history hook compresses before prompt budgeting while preserving WI inp
         return fallbackFetch(url, init);
     };
     const history = h.ctx.chat.map((m, index) => ({ ...structuredClone(m), index }));
-    await h.host.rphMemoryInterceptor(history, 10000, () => {}, 'normal');
+    await h.host.layeredMemoryInterceptor(history, 10000, () => {}, 'normal');
     const wiInput = history.map(m => m.mes).reverse();
     const saved = structuredClone(h.ctx.chat);
     await h.events.emit('WORLDINFO_ENTRIES_LOADED');

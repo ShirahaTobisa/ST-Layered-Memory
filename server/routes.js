@@ -116,7 +116,7 @@ export function registerRoutes(router, getEngine) {
         }
         store.db.transaction(() => {
             for (const memory of restored.values()) store.put(id, memory);
-            for (const group of groups) store.put(id, { ...group, ids: [...new Set(group.ids || group.sourceMemories?.flatMap(memory => memory.ids || []) || [])], enabled: group.enabled !== false, recipe: 'rph-1.9.5' });
+            for (const group of groups) store.put(id, { ...group, ids: [...new Set(group.ids || group.sourceMemories?.flatMap(memory => memory.ids || []) || [])], enabled: group.enabled !== false, recipe: 'lm-1.9.5' });
             store.schedule(id);
         })();
         return { ...store.state(id), restored: restored.size + groups.length };

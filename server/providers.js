@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { DEFAULTS, assertNumber, cleanText } from '../shared/model.js';
-import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt } from '../shared/rph-prompts.js';
+import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt } from '../shared/summary-prompts.js';
 
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const summarySignature = config => hash(['rph-1.9.5', config.summary.url, config.summary.model]);
-export const vectorSignature = config => hash(['rph-1.9.5', config.embedding.url, config.embedding.model]);
+export const summarySignature = config => hash(['lm-1.9.5', config.summary.url, config.summary.model]);
+export const vectorSignature = config => hash(['lm-1.9.5', config.embedding.url, config.embedding.model]);
 
 export function configure(input, previous = DEFAULTS) {
     const next = structuredClone(DEFAULTS);

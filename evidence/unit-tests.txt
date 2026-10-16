@@ -1,4 +1,4 @@
-> st-rph-memory@0.2.0 test
+> st-layered-memory@0.2.0 test
 > node --test test/*.test.js
 
 TAP version 13

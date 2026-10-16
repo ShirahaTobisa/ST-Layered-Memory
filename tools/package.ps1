@@ -15,7 +15,7 @@ foreach ($kind in @('frontend', 'server')) {
         $files = if ($item.PSIsContainer) { Get-ChildItem -LiteralPath $item.FullName -File -Recurse } else { @($item) }
         foreach ($file in $files) {
             $relative = $file.FullName.Substring($product.Length + 1).Replace('\', '/')
-            $entries += [pscustomobject]@{ source = $file.FullName; path = "$kind/ST-RPH-Memory/$relative"; bytes = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+            $entries += [pscustomobject]@{ source = $file.FullName; path = "$kind/ST-Layered-Memory/$relative"; bytes = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
         }
     }
 }
@@ -26,7 +26,7 @@ foreach ($file in $entries.source | Select-Object -Unique | Where-Object { $_.En
     & node --check $file
     if ($LASTEXITCODE -ne 0) { throw "Syntax check failed: $file" }
 }
-$zipPath = Join-Path $release "ST-RPH-Memory-$version-$(Get-Date -Format yyyyMMdd).zip"
+$zipPath = Join-Path $release "ST-Layered-Memory-$version-$(Get-Date -Format yyyyMMdd).zip"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
 try {

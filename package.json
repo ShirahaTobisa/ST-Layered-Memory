@@ -1,5 +1,5 @@
 {
-  "name": "st-rph-memory",
+  "name": "st-layered-memory",
   "version": "0.2.0",
   "private": true,
   "type": "module",

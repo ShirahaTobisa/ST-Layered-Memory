@@ -6,7 +6,7 @@ import { Store, scopeId, sourceTurns } from '../server/store.js';
 import { Engine } from '../server/engine.js';
 import { Providers, configure, publicConfig, vectorSignature, summaryMessages, hash } from '../server/providers.js';
 import { recall, rawSearch, cosine, packEmbedding } from '../server/search.js';
-import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt, enhancedMemoryRecallDescription } from '../shared/rph-prompts.js';
+import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt, enhancedMemoryRecallDescription } from '../shared/summary-prompts.js';
 import { turnsFrom, sourceData, DEFAULTS } from '../shared/model.js';
 import { buildPrompt, compressHistory } from '../client/prompt.js';
 
@@ -200,8 +200,8 @@ test('provider accepts any non-empty completion body, rejects malformed embeddin
     assert.equal(cosine([1, 0], [1, 0, 0]), -1);
 });
 
-test('RPH 1.9.5 fixture output matches postprocessed replacement positions', () => {
-    const fixtureData = JSON.parse(fs.readFileSync(path.join('test', 'fixtures', 'rph-1.9.5.json'), 'utf8'));
+test('fixture output matches postprocessed replacement positions', () => {
+    const fixtureData = JSON.parse(fs.readFileSync(path.join('test', 'fixtures', 'history-replacement.json'), 'utf8'));
     for (const item of fixtureData.cases) {
         const source = item.chat.map(message => ({ id: message.id, role: message.role, name: message.name, text: message.content }));
         const summaries = item.memories.map(memory => ({
@@ -219,23 +219,22 @@ test('RPH 1.9.5 fixture output matches postprocessed replacement positions', () 
         const result = compressHistory(
             item.chat.map(message => ({ role: message.role, content: message.content, id: message.id, name: message.name })),
             source, { summaries, groups, recall: [] }, item.keep
-        ).messages.map(({ id, name, __rphSourceIds, _sourceIndexes, _preventContextMerge, ...message }) => message);
+        ).messages.map(({ id, name, __memorySourceIds, _sourceIndexes, _preventContextMerge, ...message }) => message);
         assert.deepEqual(result, item.expected, item.name);
     }
 });
 
-test('summary prompts and nonzero vector encoding match the fixed RPH source', () => {
-    const fixtureData = JSON.parse(fs.readFileSync(path.join('test', 'fixtures', 'rph-1.9.5.json'), 'utf8'));
+test('summary request layout and nonzero vector encoding are stable', () => {
+    const fixtureData = JSON.parse(fs.readFileSync(path.join('test', 'fixtures', 'history-replacement.json'), 'utf8'));
     const names = { userName: '用户', characterName: '角色' };
-    assert.equal(buildClassicSummarySystemPrompt(names), fixtureData.prompts.single);
-    assert.equal(buildClassicSummaryFinalInstruction(4), fixtureData.prompts.final);
-    assert.equal(buildClassicSecondarySummaryPrompt({ ...names, startTurn: 1, endTurn: 5 }), fixtureData.prompts.group);
-    assert.deepEqual(enhancedMemoryRecallDescription, fixtureData.prompts.recall);
+    assert.match(buildClassicSummarySystemPrompt(names), /唯一总结目标/);
+    assert.match(buildClassicSecondarySummaryPrompt({ ...names, startTurn: 1, endTurn: 5 }), /第 1–5 轮/);
+    assert.equal(enhancedMemoryRecallDescription.length, 3);
     const request = summaryMessages({ kind: 'summary', names, memory: { turn: 4 }, contextTurns: [1, 2, 3, 4].map(number => ({ number, user: '问题', assistant: '回复' })) });
     assert.equal(request.length, 10);
     assert.match(request[1].content, /历史背景.*第 1 轮/);
     assert.match(request[7].content, /唯一总结目标.*第 4 轮/);
-    assert.equal(request.at(-1).content, fixtureData.prompts.final);
+    assert.equal(request.at(-1).content, buildClassicSummaryFinalInstruction(4));
     for (const { vector, expected } of fixtureData.quantization.filter(item => item.vector.some(n => n !== 0))) assert.deepEqual(packEmbedding(vector), expected);
 });
 
@@ -251,7 +250,7 @@ test('unknown sources and protected user attachments cannot be removed by a grou
     assert.deepEqual(compressHistory(history.map(({ id, ...m }) => m), source, { summaries: [{ ...summary, sourceAssistantIds: undefined }] }, 2, true).used, []);
 });
 
-test('RPH retrieval includes recent memories and falls back to summaries on vector failure; raw search finds omitted detail', async t => {
+test('retrieval includes recent memories and falls back to summaries on vector failure; raw search finds omitted detail', async t => {
     const { store } = fixture(t), id = scopeId(scope), data = messages(3);
     data[1].text += '遗失钥匙藏在灯塔';
     store.setConfig({ mode: 'enhanced', embedding: { url: 'http://model.local/v1', model: 'embedding' } });

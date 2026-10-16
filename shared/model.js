@@ -1,4 +1,4 @@
-export const KEY = 'rph_memory';
+export const KEY = 'layered_memory';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
     version: 2, mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5,

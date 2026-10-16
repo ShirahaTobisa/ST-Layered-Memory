@@ -1,4 +1,5 @@
-import { enhancedMemoryRecallDescription } from '../shared/rph-prompts.js';
+import { enhancedMemoryRecallDescription } from '../shared/summary-prompts.js';
+import { KEY } from '../shared/model.js';
 
 const plain = message => typeof message.content === 'string' && !message.tool_calls && !message.tool_call_id && !message.reasoning && !message.reasoning_content;
 const xml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -16,7 +17,7 @@ export function appendRecall(messages, memories) {
 function mergeHistory(history) {
     const entries = [];
     for (const [index, message] of history.entries()) {
-        const ids = Array.isArray(message.__rphSourceIds) ? message.__rphSourceIds.filter(Boolean) : message.id ? [message.id] : [];
+        const ids = Array.isArray(message.__memorySourceIds) ? message.__memorySourceIds.filter(Boolean) : message.id ? [message.id] : [];
         const previous = entries.at(-1);
         const mergeable = plain(message) && ['user', 'assistant'].includes(message.role)
             && !message._preventContextMerge && previous?.mergeable && previous.role === message.role;
@@ -54,12 +55,12 @@ function memoryTurns(memory, turns, sourceById) {
     return turns.filter(turn => turn.assistant.ids.length && turn.assistant.ids.every(id => assistantIds.has(id)));
 }
 
-// Mirrors RPH's postprocessed history: recent merged floors remain raw, while
+// Mirrors the postprocessed history: recent merged floors remain raw, while
 // older matching assistant floors receive their summaries.
 export function compressHistory(history, source, plan = {}, keep, preserveRaw = false) {
     const entries = mergeHistory(history), turns = conversationTurns(entries);
     const sourceById = new Map(source.map(message => [message.id, message]));
-    // RPH counts every non-system postprocessed floor, including tool and media
+    // Every non-system postprocessed floor counts, including tool and media
     // messages. Only user/assistant floors can be replaced by a memory.
     const contextEntries = entries.filter(entry => entry.role !== 'system');
     const contextIndex = new Map(contextEntries.map((entry, index) => [entry, index]));
@@ -80,11 +81,11 @@ export function compressHistory(history, source, plan = {}, keep, preserveRaw = 
         }
         replacements.set(retained.user, {
             ...retained.user.message, role: 'user', content: `总结记忆 第 ${memory.turn}-${memory.end} 轮`,
-            __rphSourceIds: [], _sourceIndexes: [], _preventContextMerge: true,
+            __memorySourceIds: [], _sourceIndexes: [], _preventContextMerge: true,
         });
         replacements.set(retained.assistant, {
             ...retained.assistant.message, role: 'assistant', content: memory.summary,
-            __rphSourceIds: [], _sourceIndexes: [],
+            __memorySourceIds: [], _sourceIndexes: [],
         });
         used.push(memory);
     }
@@ -92,7 +93,7 @@ export function compressHistory(history, source, plan = {}, keep, preserveRaw = 
     for (const memory of [...summaries].sort((a, b) => Number(a.turn) - Number(b.turn))) {
         const turn = memoryTurns(memory, turns, sourceById).find(eligible);
         if (!turn || replacements.has(turn.assistant) || removed.has(turn.assistant)) continue;
-        replacements.set(turn.assistant, { ...turn.assistant.message, content: memory.summary, __rphSourceIds: [], _sourceIndexes: [] });
+        replacements.set(turn.assistant, { ...turn.assistant.message, content: memory.summary, __memorySourceIds: [], _sourceIndexes: [] });
         used.push(memory);
     }
 
@@ -110,7 +111,7 @@ export function compressHistory(history, source, plan = {}, keep, preserveRaw = 
 // Fallback for requests that did not pass through the normal ST history hook.
 export async function buildPrompt(messages, source, prepared, plan, config, count, promptLimit, tools = []) {
     if (messages.some(m => Array.isArray(m.content))) return { messages, used: [], reason: '本轮含多媒体，保留原请求' };
-    const rendered = new Map(prepared.filter(m => m.extra?.rph_memory?.id).map(m => [m.extra.rph_memory.id, m.mes]));
+    const rendered = new Map(prepared.filter(m => (m.extra?.[KEY] ?? m.extra?.rph_memory)?.id).map(m => [(m.extra[KEY] ?? m.extra.rph_memory).id, m.mes]));
     const candidates = source.map(m => ({ ...m, text: rendered.get(m.id) ?? m.text }));
     const history = messages.map(m => {
         const found = candidates.filter(s => plain(m) && m.role === s.role && [s.text, `${s.name}: ${s.text}`].includes(m.content));
@@ -118,7 +119,7 @@ export async function buildPrompt(messages, source, prepared, plan, config, coun
         return unique ? { ...m, id: found[0].id } : { ...m };
     });
     const compressed = compressHistory(history, source, plan, config.keep, true);
-    const output = compressed.messages.map(({ id, __rphSourceIds, _sourceIndexes, _preventContextMerge, origin, ...m }) => m);
+    const output = compressed.messages.map(({ id, __memorySourceIds, _sourceIndexes, _preventContextMerge, origin, ...m }) => m);
     const recall = appendRecall(output, plan.recall);
     const used = [...compressed.used, ...recall.used];
     if (count && Number.isFinite(promptLimit)) {
