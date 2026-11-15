@@ -1,5 +1,5 @@
 export const KEY = 'layered_memory';
-export const VERSION = '0.2.1';
+export const VERSION = '0.2.2';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
     version: 2, mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5,
