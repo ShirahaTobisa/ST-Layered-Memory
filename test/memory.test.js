@@ -7,7 +7,7 @@ import { Engine } from '../server/engine.js';
 import { Providers, configure, publicConfig, vectorSignature, summaryMessages, hash } from '../server/providers.js';
 import { recall, rawSearch, cosine, packEmbedding } from '../server/search.js';
 import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt, enhancedMemoryRecallDescription } from '../shared/summary-prompts.js';
-import { turnsFrom, sourceData, DEFAULTS } from '../shared/model.js';
+import { turnsFrom, sourceData, cleanText, DEFAULTS } from '../shared/model.js';
 import { buildPrompt, compressHistory } from '../client/prompt.js';
 
 const scope = { actor: 'character:alice.png', chat: 'story', lineage: 'lineage-a' };
@@ -88,12 +88,7 @@ test('obsolete model results cannot overwrite edited chat or stopped work', asyn
 test('persistent storage failure stops the worker without pretending a summary was saved', async t => {
     const { store } = fixture(t), id = scopeId(scope);
     store.setConfig({ concurrency: 1 }); store.sync(scope, messages(1), null);
-    const prepare = store.db.prepare.bind(store.db);
     store.put = () => { throw new Error('simulated disk failure'); };
-    store.db.prepare = sql => {
-        if (sql.includes("SET status='error'")) throw new Error('simulated disk failure');
-        return prepare(sql);
-    };
     const engine = new Engine(store, provider); engine.wake();
     await Promise.allSettled([...engine.active.values()].map(task => task.promise));
     assert.match(engine.fault, /存储写入失败/);
@@ -160,7 +155,7 @@ test('five-turn compaction skips empty turns, retains all valid per-turn sources
 test('branches reuse exact target sources only; unrelated imports do not inherit memories', async t => {
     const { store } = fixture(t); store.sync(scope, messages(5), null); await settle(new Engine(store, provider));
     const branch = { ...scope, chat: 'branch' };
-    store.sync(branch, messages(3), null); assert.equal(store.memories(scopeId(branch)).length, 3);
+    store.sync(branch, messages(3), null, scope.chat); assert.equal(store.memories(scopeId(branch)).length, 3);
     const imported = messages(3).map(m => ({ ...m, id: `import-${m.id}` }));
     const other = { ...scope, chat: 'import' }; store.sync(other, imported, null);
     assert.equal(store.memories(scopeId(other)).length, 0);
@@ -187,8 +182,8 @@ test('separate user stores do not share snapshots, keys, or task results', t => 
     assert.equal(publicConfig(a.config).summary.hasKey, true);
 });
 
-test('provider accepts any non-empty completion body, rejects malformed embeddings and invalid model URLs', async () => {
-    for (const finish of ['length', 'content_filter', undefined]) {
+test('provider accepts complete text with optional finish metadata, rejects malformed embeddings and invalid model URLs', async () => {
+    for (const finish of ['stop', undefined]) {
         const p = new Providers(async () => Response.json({ choices: [{ message: { content: '半截' }, finish_reason: finish }] }));
         assert.equal(await p.summarize(config, { kind: 'summary', memory: { turn: 1 }, contextTurns: [{ number: 1, user: '问题', assistant: '回复' }] }), '半截');
     }
@@ -296,4 +291,184 @@ test('a repeated old source cannot claim the single matching message left in the
     const input = source.slice(2).map(m => ({ role: m.role, content: m.text }));
     const result = await buildPrompt(input, source, [], { summaries, groups: [], recall: [] }, { ...DEFAULTS, keep: 2 }, async text => text.length, 10000);
     assert.deepEqual(result.messages, input);
+});
+
+test('thinking blocks stay out of summaries, vectors and long original-text searches', async t => {
+    assert.equal(cleanText('<analysis mode="private">secret<think>nested</think>hidden</analysis>正文<reasoning>unfinished'), '正文');
+    assert.equal(cleanText('<konatan_planning~>secret</konatan_planning~>正文'), '正文');
+    const { store } = fixture(t), id = scopeId(scope), data = messages(2);
+    data[0].text = '<think>private input</think>问题';
+    data[1].text = 'x'.repeat(6000) + '月光钥匙';
+    const state = store.sync(scope, data, null);
+    await settle(new Engine(store, { ...provider, summarize: async () => '<analysis mode="private">secret</analysis>事实' }));
+    assert.ok(store.memories(id).every(m => m.summary === '事实' && !m.userText.includes('private')));
+    assert.match(rawSearch(data, '月光钥匙')[0]?.text || '', /月光钥匙/);
+    assert.ok(rawSearch(data, '月光钥匙')[0].text.length <= 1406);
+    const first = store.memories(id)[0];
+    assert.throws(() => store.edit(id, first.id, { summary: '<think>only thinking</think>' }), /正文|为空/);
+    assert.equal(store.chat(id).revision, state.revision);
+    assert.equal(store.chat(id).messages[0].text, data[0].text);
+});
+
+test('summary content excludes reasoning parts and refuses explicitly truncated results', async () => {
+    const input = { kind: 'summary', memory: { turn: 1 }, contextTurns: [{ number: 1, user: '问', assistant: '答' }] };
+    const provider = body => new Providers(async () => Response.json({ choices: [body] }));
+    const mixed = provider({ message: { content: [{ type: 'reasoning', text: 'secret' }, { type: 'text', text: '正文' }] } });
+    assert.equal(await mixed.summarize(config, input), '正文');
+    for (const finish_reason of ['length', 'content_filter', 'tool_calls']) {
+        await assert.rejects(provider({ message: { content: '半截' }, finish_reason }).summarize(config, input), /完整/);
+    }
+});
+
+test('disabled summaries cannot return through automatic merged memories', async t => {
+    const { store } = fixture(t), id = scopeId(scope);
+    store.sync(scope, messages(31), null);
+    const engine = new Engine(store, provider); await settle(engine);
+    const first = store.memories(id).find(m => m.kind === 'summary' && m.turn === 1);
+    store.edit(id, first.id, { enabled: false }); await settle(engine);
+    assert.ok(store.memories(id).filter(m => m.kind === 'group').every(m => !m.children.includes(first.id)));
+});
+
+test('branches inherit only their declared parent including manual group edits', async t => {
+    const { store } = fixture(t), data = messages(31), parentId = scopeId(scope);
+    store.sync(scope, data, null); await settle(new Engine(store, provider));
+    const first = store.memories(parentId).find(m => m.kind === 'summary' && m.turn === 1);
+    const sibling = { ...scope, chat: 'sibling' };
+    store.sync(sibling, data, null, scope.chat);
+    store.edit(scopeId(sibling), first.id, { summary: 'sibling-only edit' });
+    const parentGroup = store.memories(parentId).find(m => m.kind === 'group');
+    store.edit(parentId, parentGroup.id, { summary: 'parent manual group', enabled: false });
+    const branch = { ...scope, chat: 'new-branch' };
+    store.sync(branch, data, null, scope.chat);
+    const copied = store.memories(scopeId(branch));
+    assert.equal(copied.find(m => m.id === first.id).summary, first.summary);
+    assert.equal(copied.find(m => m.id === parentGroup.id)?.summary, 'parent manual group');
+    assert.equal(copied.find(m => m.id === parentGroup.id)?.enabled, false);
+    const independent = { ...scope, chat: 'independent' };
+    store.sync(independent, data, null);
+    assert.equal(store.memories(scopeId(independent)).length, 0);
+});
+
+test('failed configuration writes restore the in-memory configuration too', t => {
+    const { store } = fixture(t);
+    store.sync(scope, messages(1), null);
+    const previous = structuredClone(store.config);
+    store.schedule = () => { throw new Error('schedule failed'); };
+    assert.throws(() => store.setConfig({ keep: 40 }), /schedule failed/);
+    assert.deepEqual(store.config, previous);
+    assert.deepEqual(JSON.parse(store.db.prepare('SELECT data FROM config').get().data), previous);
+});
+
+test('uncompleted earlier replies are not sent as background for a later summary', t => {
+    const { store } = fixture(t), data = messages(3);
+    data[1].text = 'cancelled private draft'; data[1].blocked = true;
+    store.sync(scope, data, null);
+    const jobs = store.db.prepare("SELECT input FROM jobs WHERE kind='summary'").all().map(row => JSON.parse(row.input));
+    assert.ok(jobs.every(job => !JSON.stringify(job).includes('cancelled private draft')));
+});
+
+test('editing one source during an embedding batch requeues unaffected memories', async t => {
+    const { store } = fixture(t), id = scopeId(scope);
+    store.sync(scope, messages(3), null); await settle(new Engine(store, provider));
+    store.setConfig({ mode: 'enhanced', embedding: { url: 'http://local/v1', model: 'embedding' } });
+    let started;
+    const waiting = new Promise(resolve => { started = resolve; });
+    const engine = new Engine(store, { ...provider, embed: async (_, texts, signal) => {
+        started();
+        return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    } });
+    engine.wake(); await waiting;
+    const first = store.memories(id).find(m => m.turn === 1);
+    store.edit(id, first.id, { summary: 'changed while indexing' });
+    engine.providers = provider;
+    await settle(engine);
+    assert.equal(store.state(id).indexed, 3);
+    assert.equal(store.state(id).counts.error || 0, 0);
+});
+
+test('startup cleans legacy thinking and stale vectors even in a paused chat', async t => {
+    const { store, filename } = fixture(t), id = scopeId(scope), data = messages(1);
+    store.sync(scope, data, null); await settle(new Engine(store, provider)); store.pause(id, true);
+    const memory = store.memories(id)[0];
+    memory.summary = '<reasoning>private</reasoning>保留事实'; memory.userText = '<analysis>private</analysis>用户问题 0';
+    Object.assign(memory, packEmbedding([1, 0]), { vectorSignature: vectorSignature(store.config) });
+    store.db.prepare('UPDATE memories SET data=? WHERE chat_id=? AND id=?').run(JSON.stringify(memory), id, memory.id);
+    store.close();
+    const reopened = new Store(filename);
+    try {
+        const cleaned = reopened.memories(id)[0];
+        assert.equal(cleaned.summary, '保留事实'); assert.equal(cleaned.userText, '用户问题 0');
+        assert.equal(cleaned.embeddingQ, undefined); assert.equal(cleaned.vectorSignature, undefined);
+        assert.equal(reopened.state(id).paused, true);
+        assert.deepEqual(reopened.chat(id).messages.map(m => m.text), data.map(m => m.text));
+    } finally { reopened.close(); }
+});
+
+test('hide and unhide preserve edited summaries, disabled states and vectors', async t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(31);
+    store.setConfig({ mode: 'enhanced', embedding: { url: 'http://local/v1', model: 'embedding' } });
+    let state = store.sync(scope, data, null);
+    await settle(new Engine(store, provider));
+    const first = store.memories(id).find(m => m.kind === 'summary' && m.turn === 1);
+    store.edit(id, first.id, { summary: '必须保留的手动修改' });
+    await settle(new Engine(store, provider));
+    const group = store.memories(id).find(m => m.kind === 'group');
+    store.edit(id, group.id, { enabled: false });
+    const before = store.memories(id);
+    const hidden = data.map((m, index) => index < 10 ? { ...m, hidden: true } : m);
+    state = store.sync(scope, hidden, state.revision);
+    assert.ok(store.chat(id).messages[1].hidden);
+    assert.deepEqual(store.memories(id), before);
+    assert.equal(store.state(id).counts.queued || 0, 0);
+    assert.match(rawSearch(store.chat(id).messages, '角色经历 0')[0].text, /角色经历 0/);
+    store.sync(scope, data, state.revision);
+    assert.deepEqual(store.memories(id), before);
+});
+
+test('hidden histories inject summaries in both modes without restoring raw text', async () => {
+    const source = messages(4), turns = sourceTurns(source);
+    for (const message of source.slice(0, 4)) message.hidden = true;
+    const summaries = turns.map(t => ({ id: t.key, turn: t.number, ids: t.ids, sourceAssistantIds: t.assistantIds, sourceUserIds: t.userIds, summary: `记忆${t.number}`, enabled: true }));
+    const history = source.filter(m => !m.hidden).map(m => ({ id: m.id, role: m.role, content: m.text }));
+    for (const mode of ['classic', 'enhanced']) {
+        const result = await buildPrompt(history.map(({ id, ...m }) => m), source, [], { summaries, groups: [], recall: [] }, { ...DEFAULTS, mode }, async () => 100, 1000);
+        assert.deepEqual(result.used.map(m => m.id), summaries.slice(0, 2).map(m => m.id));
+        assert.ok(result.messages.some(m => m.content === '记忆1'));
+        assert.ok(result.messages.some(m => m.content === '记忆2'));
+        assert.ok(!JSON.stringify(result.messages).includes('角色经历 0'));
+        assert.ok(!JSON.stringify(result.messages).includes('用户问题 0'));
+        assert.deepEqual(result.messages.slice(-4), history.map(({ id, ...m }) => m));
+    }
+    const disabled = structuredClone(summaries); disabled[0].enabled = false;
+    assert.deepEqual(compressHistory(history, source, { summaries: disabled }, 20, true).used.map(m => m.id), [summaries[1].id]);
+    assert.deepEqual(compressHistory(history, source, {}, 20, true).messages, history);
+    const prefills = [{ role: 'system', content: 'system instruction' }, { role: 'assistant', content: 'prefill' }];
+    const continued = compressHistory(prefills, source, { summaries }, 20, true).messages;
+    assert.equal(continued[0], prefills[0]); assert.equal(continued.at(-1), prefills[1]);
+});
+
+test('a hidden merged memory is injected once and hiding one side keeps visible text intact', () => {
+    const source = messages(4), turns = sourceTurns(source);
+    source[1].hidden = true;
+    const summaries = turns.map(t => ({ id: t.key, turn: t.number, ids: t.ids, summary: `记忆${t.number}`, enabled: true }));
+    const group = { id: 'merged', kind: 'group', turn: 1, end: 2, ids: turns.slice(0, 2).flatMap(t => t.ids), children: summaries.slice(0, 2).map(m => m.id), summary: '旧剧情合并', enabled: true };
+    const history = source.filter(m => !m.hidden).map(m => ({ id: m.id, role: m.role, content: m.text }));
+    const result = compressHistory(history, source, { groups: [group], summaries }, 20, true);
+    assert.deepEqual(result.used.map(m => m.id), [group.id]);
+    assert.equal(result.messages.filter(m => m.content === group.summary).length, 1);
+    for (const m of history) assert.ok(result.messages.some(item => item === m));
+    const off = compressHistory(history, source, { groups: [{ ...group, enabled: false }], summaries }, 20, true);
+    assert.deepEqual(off.messages, history);
+    assert.deepEqual(off.used, []);
+});
+
+test('hidden sources still invalidate memories when edited, swiped or deleted', async t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(2).map(m => ({ ...m, hidden: true }));
+    let state = store.sync(scope, data, null); await settle(new Engine(store, provider));
+    data[1].text = '隐藏期间换了回复'; data[1].swipe = 1;
+    state = store.sync(scope, data, state.revision);
+    assert.equal(store.memories(id).length, 1);
+    await settle(new Engine(store, provider));
+    store.sync(scope, data.slice(2), state.revision);
+    assert.ok(store.memories(id).every(m => !m.ids.includes('a0')));
 });

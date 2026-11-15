@@ -3,6 +3,7 @@ import { KEY } from '../shared/model.js';
 
 const plain = message => typeof message.content === 'string' && !message.tool_calls && !message.tool_call_id && !message.reasoning && !message.reasoning_content;
 const xml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const memoryIds = memory => memory.ids?.length ? memory.ids : [...memory.sourceUserIds || [], ...memory.sourceAssistantIds || []];
 
 export function appendRecall(messages, memories) {
     const index = messages.findLastIndex(m => m.role === 'user' && plain(m));
@@ -12,6 +13,13 @@ export function appendRecall(messages, memories) {
         `    <user_input>${xml(m.userText)}</user_input>`, `    <summary>${xml(m.summary)}</summary>`, '  </memory_fragment>',
     ].join('\n')), '</enhanced_memory_recall>'].join('\n');
     return { messages: messages.map((m, i) => i === index ? { ...m, content: `${m.content}\n\n${block}` } : m), used: memories };
+}
+
+export async function checkPromptSize(messages, tools, count, limit) {
+    if (!count || !Number.isFinite(limit)) return;
+    const tokens = await count(JSON.stringify({ messages, tools }));
+    if (!Number.isFinite(tokens)) throw new Error('Token 计数失败');
+    if (tokens > limit) throw new Error('完整记忆超过当前上下文容量，请提高上下文上限；未截掉记忆');
 }
 
 function mergeHistory(history) {
@@ -55,6 +63,28 @@ function memoryTurns(memory, turns, sourceById) {
     return turns.filter(turn => turn.assistant.ids.length && turn.assistant.ids.every(id => assistantIds.has(id)));
 }
 
+function insertHiddenMemories(messages, source, memories) {
+    if (!memories.length) return messages;
+    const positions = new Map(source.map((m, index) => [m.id, index]));
+    const anchors = messages.map(m => (m.__memorySourceIds?.length ? m.__memorySourceIds : [m.id]).map(id => positions.get(id)).filter(index => index !== undefined));
+    const insertions = new Map();
+    for (const memory of [...memories].sort((a, b) => a.turn - b.turn)) {
+        const end = Math.max(...memoryIds(memory).map(id => positions.get(id)));
+        let index = anchors.findIndex(ids => ids.some(position => position > end));
+        if (index < 0) {
+            const previous = anchors.findLastIndex(ids => ids.some(position => position <= end));
+            index = previous >= 0 ? previous + 1 : messages.findLastIndex(m => m.role === 'user');
+            if (index < 0) index = messages.findIndex(m => m.role !== 'system');
+            if (index < 0) index = messages.length;
+        }
+        const items = insertions.get(index) || [];
+        items.push({ role: 'user', content: `总结记忆 第 ${memory.turn}${memory.end ? `-${memory.end}` : ''} 轮`, _preventContextMerge: true },
+            { role: 'assistant', content: memory.summary });
+        insertions.set(index, items);
+    }
+    return messages.flatMap((m, index) => [...insertions.get(index) || [], m]).concat(insertions.get(messages.length) || []);
+}
+
 // Mirrors the postprocessed history: recent merged floors remain raw, while
 // older matching assistant floors receive their summaries.
 export function compressHistory(history, source, plan = {}, keep, preserveRaw = false) {
@@ -70,9 +100,14 @@ export function compressHistory(history, source, plan = {}, keep, preserveRaw = 
     const groups = (plan.groups || []).filter(memory => memory.enabled !== false);
     const covered = new Set((plan.groups || []).flatMap(memory => memory.children || []));
     const summaries = (plan.summaries || []).filter(memory => memory.enabled !== false && !covered.has(memory.id));
+    const hasHiddenSource = memory => memoryIds(memory).some(id => sourceById.get(id)?.hidden);
+    const hidden = [...groups, ...summaries].filter(memory => hasHiddenSource(memory) && memoryIds(memory).every(id => {
+        const message = sourceById.get(id);
+        return message && message.role !== 'system' && !message.blocked;
+    }));
     const replacements = new Map(), removed = new Set(), used = [];
 
-    for (const memory of [...groups].sort((a, b) => Number(a.turn) - Number(b.turn))) {
+    for (const memory of groups.filter(memory => !hasHiddenSource(memory)).sort((a, b) => Number(a.turn) - Number(b.turn))) {
         const matched = memoryTurns(memory, turns, sourceById).filter(turn => eligible(turn) && safe(turn.user));
         if (!matched.length) continue;
         const retained = matched.at(-1);
@@ -90,7 +125,7 @@ export function compressHistory(history, source, plan = {}, keep, preserveRaw = 
         used.push(memory);
     }
 
-    for (const memory of [...summaries].sort((a, b) => Number(a.turn) - Number(b.turn))) {
+    for (const memory of summaries.filter(memory => !hasHiddenSource(memory)).sort((a, b) => Number(a.turn) - Number(b.turn))) {
         const turn = memoryTurns(memory, turns, sourceById).find(eligible);
         if (!turn || replacements.has(turn.assistant) || removed.has(turn.assistant)) continue;
         replacements.set(turn.assistant, { ...turn.assistant.message, content: memory.summary, __memorySourceIds: [], _sourceIndexes: [] });
@@ -105,14 +140,14 @@ export function compressHistory(history, source, plan = {}, keep, preserveRaw = 
         else if (preserveRaw) messages.push(...entry.originalIndexes.map(index => history[index]));
         else messages.push({ ...entry.message, content: entry.content });
     }
-    return { messages, used };
+    return { messages: insertHiddenMemories(messages, source, hidden), used: [...used, ...hidden] };
 }
 
 // Fallback for requests that did not pass through the normal ST history hook.
 export async function buildPrompt(messages, source, prepared, plan, config, count, promptLimit, tools = []) {
     if (messages.some(m => Array.isArray(m.content))) return { messages, used: [], reason: '本轮含多媒体，保留原请求' };
     const rendered = new Map(prepared.filter(m => (m.extra?.[KEY] ?? m.extra?.rph_memory)?.id).map(m => [(m.extra[KEY] ?? m.extra.rph_memory).id, m.mes]));
-    const candidates = source.map(m => ({ ...m, text: rendered.get(m.id) ?? m.text }));
+    const candidates = source.filter(m => !m.hidden).map(m => ({ ...m, text: rendered.get(m.id) ?? m.text }));
     const history = messages.map(m => {
         const found = candidates.filter(s => plain(m) && m.role === s.role && [s.text, `${s.name}: ${s.text}`].includes(m.content));
         const unique = found.length === 1 && messages.filter(p => p.role === m.role && p.content === m.content).length === 1;
@@ -120,12 +155,8 @@ export async function buildPrompt(messages, source, prepared, plan, config, coun
     });
     const compressed = compressHistory(history, source, plan, config.keep, true);
     const output = compressed.messages.map(({ id, __memorySourceIds, _sourceIndexes, _preventContextMerge, origin, ...m }) => m);
-    const recall = appendRecall(output, plan.recall);
+    const recall = appendRecall(output, plan.recall || []);
     const used = [...compressed.used, ...recall.used];
-    if (count && Number.isFinite(promptLimit)) {
-        const tokens = await count(JSON.stringify({ messages: recall.messages, tools }));
-        if (!Number.isFinite(tokens)) throw new Error('Token 计数失败');
-        if (tokens > promptLimit) throw new Error('完整记忆超过当前上下文容量，请提高上下文上限；未截掉记忆');
-    }
+    await checkPromptSize(recall.messages, tools, count, promptLimit);
     return { messages: recall.messages, used: used.map(m => ({ ...m, why: m.why || ['脉络总结'] })), reason: used.length ? `本轮使用 ${used.length} 条记忆` : '本轮保留原文，暂无可替换的记忆' };
 }

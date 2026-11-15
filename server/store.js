@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Database } from './database.js';
-import { DEFAULTS, turnsFrom, sourceData, eligibleGroups, roleText } from '../shared/model.js';
+import { DEFAULTS, turnsFrom, sourceData, eligibleGroups, roleText, cleanMemory, cleanText, stripVector } from '../shared/model.js';
 import { configure, hash, summarySignature, vectorSignature } from './providers.js';
 
 const parse = row => row ? JSON.parse(row.data) : null;
@@ -37,7 +37,9 @@ export class Store {
         this.config = configure(savedConfig, DEFAULTS);
         if (savedConfig.version !== 2) this.migrateLegacy(filename);
         this.db.prepare("UPDATE jobs SET status='queued', lease=NULL WHERE status='running'").run();
-        for (const row of this.db.prepare('SELECT id FROM chats WHERE paused=0').all()) this.schedule(row.id);
+        this.db.transaction(() => {
+            for (const row of this.db.prepare('SELECT id FROM chats').all()) this.schedule(row.id);
+        })();
     }
 
     close() { this.db.close(); }
@@ -79,42 +81,55 @@ export class Store {
         return row ? { ...row, scope: JSON.parse(row.scope), messages: JSON.parse(row.snapshot) } : null;
     }
     memories(id) { return this.db.prepare('SELECT data FROM memories WHERE chat_id=?').all(id).map(parse); }
-    put(id, memory) { this.db.prepare('INSERT OR REPLACE INTO memories VALUES (?,?,?)').run(id, memory.id, JSON.stringify(memory)); }
+    put(id, memory) {
+        const cleaned = cleanMemory(memory);
+        if (!cleaned.summary) throw new Error('记忆过滤思考内容后为空，保留原文');
+        this.db.prepare('INSERT OR REPLACE INTO memories VALUES (?,?,?)').run(id, memory.id, JSON.stringify(cleaned));
+    }
     remove(id, key) { this.db.prepare('DELETE FROM memories WHERE chat_id=? AND id=?').run(id, key); }
     job(id) { return this.db.prepare('SELECT * FROM jobs WHERE id=?').get(id); }
 
     setConfig(input) {
-        const next = configure(input, this.config);
-        this.db.transaction(() => {
-            this.db.prepare('INSERT OR REPLACE INTO config VALUES (1,?)').run(JSON.stringify(next));
-            this.config = next;
-            for (const row of this.db.prepare('SELECT id FROM chats').all()) this.schedule(row.id);
-        })();
+        const previous = this.config, next = configure(input, previous);
+        try {
+            this.db.transaction(() => {
+                this.db.prepare('INSERT OR REPLACE INTO config VALUES (1,?)').run(JSON.stringify(next));
+                this.config = next;
+                for (const row of this.db.prepare('SELECT id FROM chats').all()) this.schedule(row.id);
+            })();
+        } catch (error) { this.config = previous; throw error; }
         return next;
     }
 
-    sync(scope, messages, expected) {
+    inherit(id, parentId, snapshot) {
+        const turns = new Map(sourceTurns(snapshot).filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
+        const memories = this.memories(parentId), copied = new Set();
+        for (const memory of memories.filter(m => m.kind === 'summary')) {
+            const target = turns.get(memory.id);
+            if (target?.sourceHash !== memory.sourceHash) continue;
+            this.put(id, { ...memory, turn: target.number }); copied.add(memory.id);
+        }
+        for (const memory of memories.filter(m => m.kind === 'group')) {
+            if (memory.children.every(key => copied.has(key))) this.put(id, memory);
+        }
+    }
+
+    sync(scope, messages, expected, parentChat) {
         const id = scopeId(scope);
+        const parentId = parentChat && parentChat !== scope.chat ? scopeId({ ...scope, chat: parentChat }) : null;
         if (!Array.isArray(messages) || messages.length > 20000) throw new Error('聊天消息数量无效');
         const ids = new Set();
         const snapshot = messages.map(m => {
             if (typeof m.id !== 'string' || !m.id || m.id.length > 128 || ids.has(m.id) || !['user', 'assistant', 'system'].includes(m.role) || typeof m.text !== 'string' || m.text.length > 200000) throw new Error('聊天消息格式或来源 ID 无效');
             ids.add(m.id);
-            return { id: m.id, role: m.role, name: String(m.name || '').slice(0, 128), text: m.text, swipe: Number.isInteger(m.swipe) ? m.swipe : 0, blocked: !!m.blocked, protected: !!m.protected };
+            return { id: m.id, role: m.role, name: String(m.name || '').slice(0, 128), text: m.text, swipe: Number.isInteger(m.swipe) ? m.swipe : 0, blocked: !!m.blocked, protected: !!m.protected, ...(m.hidden && m.role !== 'system' ? { hidden: true } : {}) };
         });
         const revision = hash(snapshot);
         const existing = this.chat(id);
         if (existing && expected !== existing.revision && revision !== existing.revision) throw Object.assign(new Error('聊天已在其他页面更新，请刷新后重试'), { status: 409 });
         this.db.transaction(() => {
             this.db.prepare('INSERT INTO chats(id,scope,revision,snapshot) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,snapshot=excluded.snapshot').run(id, JSON.stringify(scope), revision, JSON.stringify(snapshot));
-            if (!existing) {
-                const related = this.db.prepare('SELECT m.data,c.scope FROM memories m JOIN chats c ON c.id=m.chat_id WHERE c.id<>?').all(id);
-                const turns = new Map(sourceTurns(snapshot).map(t => [t.key, t]));
-                for (const row of related) {
-                    const parent = JSON.parse(row.scope), memory = parse(row), target = turns.get(memory.id);
-                    if (parent.actor === scope.actor && parent.lineage === scope.lineage && memory.kind === 'summary' && target?.eligible && target.sourceHash === memory.sourceHash) this.put(id, { ...memory, turn: target.number });
-                }
-            }
+            if (!existing && parentId) this.inherit(id, parentId, snapshot);
             this.schedule(id);
         })();
         return this.state(id);
@@ -125,8 +140,15 @@ export class Store {
         if (!chat) return;
         const turns = sourceTurns(chat.messages);
         const validTurns = new Map(turns.filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
-        const summaries = new Map();
+        const savedMemories = [];
         for (const memory of this.memories(id)) {
+            const cleaned = cleanMemory(memory);
+            if (!cleaned.summary) { this.remove(id, memory.id); continue; }
+            if (cleaned !== memory) this.put(id, cleaned);
+            savedMemories.push(cleaned);
+        }
+        const summaries = new Map();
+        for (const memory of savedMemories) {
             if (memory.kind !== 'summary') continue;
             const turn = validTurns.get(memory.id);
             if (!turn || turn.sourceHash !== memory.sourceHash) { this.remove(id, memory.id); continue; }
@@ -136,17 +158,19 @@ export class Store {
         const jobs = [];
         if (this.config.summary.url && this.config.summary.model) for (const [index, turn] of turns.entries()) {
             if (!validTurns.has(turn.key) || summaries.has(turn.key)) continue;
+            const background = turns.slice(Math.max(0, index - 3), index).filter(t => t.eligible && !t.empty);
             jobs.push({ kind: 'summary', key: turn.key, sourceHash: turn.sourceHash, config: summarySignature(this.config),
-                memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: roleText(turn.user, false), enabled: true, recipe: 'lm-1.9.5' },
+                memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: roleText(turn.user), enabled: true, recipe: 'lm-1.9.5' },
                 names: { userName: turn.user[0]?.name, characterName: turn.assistant[0]?.name },
-                contextTurns: turns.slice(Math.max(0, index - 3), index + 1).map(t => ({ number: t.number, user: roleText(t.user), assistant: roleText(t.assistant) })),
-                prompt: `背景（只供理解）：\n${turns.slice(Math.max(0, index - 3), index).map(t => t.text).join('\n\n')}\n\n目标轮次：\n${turn.text}` });
+                contextTurns: [...background, turn].map(t => ({ number: t.number, user: roleText(t.user), assistant: roleText(t.assistant) })),
+                prompt: `背景（只供理解）：\n${background.map(t => t.text).join('\n\n')}\n\n目标轮次：\n${turn.text}` });
         }
         const groups = eligibleGroups(turns, summaries).map(group => ({ ...group, key: hash(group.ids), sourceHash: hash(group.children.map(m => [m.id, m.summary, m.enabled])) }));
+        const groupsById = new Map(groups.map(group => [group.key, group]));
         const currentGroups = new Map();
-        for (const memory of this.memories(id).filter(m => m.kind === 'group')) {
-            const group = groups.find(g => g.key === memory.id && g.sourceHash === memory.sourceHash);
-            if (!group) this.remove(id, memory.id);
+        for (const memory of savedMemories.filter(m => m.kind === 'group')) {
+            const group = groupsById.get(memory.id);
+            if (!group || group.sourceHash !== memory.sourceHash) this.remove(id, memory.id);
             else {
                 if (memory.turn !== group.children[0].turn || memory.end !== group.children.at(-1).turn) {
                     memory.turn = group.children[0].turn; memory.end = group.children.at(-1).turn; this.put(id, memory);
@@ -206,12 +230,11 @@ export class Store {
     }
 
     edit(id, memoryId, input) {
-        const memory = this.memories(id).find(m => m.id === memoryId);
+        let memory = this.memories(id).find(m => m.id === memoryId);
         if (!memory) throw new Error('记忆已失效，请刷新');
         if (input.summary !== undefined) {
-            if (typeof input.summary !== 'string' || !input.summary.trim() || input.summary.length > 20000) throw new Error('记忆正文无效');
-            memory.summary = input.summary.trim();
-            for (const key of ['vector', 'embeddingQ', 'embeddingScale', 'embeddingDims', 'embeddingEncoding', 'vectorSignature']) delete memory[key];
+            if (typeof input.summary !== 'string' || !cleanText(input.summary) || input.summary.length > 20000) throw new Error('记忆正文无效');
+            memory = { ...stripVector(memory), summary: cleanText(input.summary) };
             memory.edited = true;
         }
         if (input.enabled !== undefined) memory.enabled = !!input.enabled;

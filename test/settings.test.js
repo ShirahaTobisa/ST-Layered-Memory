@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { mountMemoryPanel } from '../client/index.js';
-import { KEY } from '../shared/model.js';
+import { KEY, VERSION, DEFAULTS } from '../shared/model.js';
 
 function harness() {
     const dom = new JSDOM('<body><div id="extensions_settings"></div></body>', { url: 'http://localhost/' });
@@ -25,7 +25,7 @@ function harness() {
         ...dom.window, document: dom.window.document, crypto, setInterval: () => 0, clearInterval() {},
         addEventListener() {}, confirm: () => true,
         fetch: async url => {
-            if (url.endsWith('/status')) return Response.json({ version: '0.2.0', config: { mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5, summary: { url: '', model: '', hasKey: false }, embedding: { url: '', model: '', hasKey: false } } });
+            if (url.endsWith('/status')) return Response.json({ version: VERSION, config: { mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5, summary: { url: '', model: '', hasKey: false }, embedding: { url: '', model: '', hasKey: false } } });
             return Response.json({ revision: 'r1', counts: {}, items: [], filteredTotal: 0 });
         }
     };
@@ -46,4 +46,47 @@ test('settings panel exposes Anima-style model, rules, memory and context contro
     assert.ok(panel.panel.querySelector('[data-view="context"]'));
     panel.dispose();
     h.dom.window.close();
+});
+
+test('failed config saves preserve the draft; successful saves clear the key input', async () => {
+    const h = harness(), panel = mountMemoryPanel(() => h.context, h.host);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const form = panel.panel.querySelector('[data-settings]'), key = form.elements.namedItem('summary.key');
+    key.value = 'unsaved-test-key';
+    const base = h.host.fetch;
+    h.host.fetch = async (url, init) => url.endsWith('/config') ? Response.json({ error: 'save failed' }, { status: 400 }) : base(url, init);
+    form.onsubmit({ preventDefault() {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(key.value, 'unsaved-test-key');
+    assert.match(panel.panel.querySelector('[data-status]').textContent, /save failed/);
+    let received;
+    h.host.fetch = async (url, init) => {
+        if (!url.endsWith('/config')) return base(url, init);
+        received = JSON.parse(init.body);
+        return Response.json({ config: { ...DEFAULTS, summary: { url: '', model: '', hasKey: true }, embedding: { url: '', model: '', hasKey: false } } });
+    };
+    form.onsubmit({ preventDefault() {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(received.summary.key, 'unsaved-test-key'); assert.equal(key.value, '');
+    assert.match(key.placeholder, /已保存/);
+    panel.dispose(); h.dom.window.close();
+});
+
+test('a failed memory switch does not display an unsaved enabled state', async () => {
+    const h = harness();
+    const base = h.host.fetch, memory = { id: 'summary', kind: 'summary', turn: 1, summary: '记忆', enabled: true, sources: [] };
+    h.host.fetch = async (url, init) => {
+        if (url.endsWith('/list')) return Response.json({ revision: 'r1', items: [memory], filteredTotal: 1, counts: {} });
+        if (url.endsWith('/edit')) return Response.json({ error: 'edit failed' }, { status: 400 });
+        return base(url, init);
+    };
+    const panel = mountMemoryPanel(() => h.context, h.host);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await panel.panel.querySelector('[data-tab="memories"]').onclick();
+    const toggle = panel.panel.querySelector('[data-memories] input[type="checkbox"]');
+    toggle.checked = false; toggle.onchange();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(toggle.checked, true);
+    assert.match(panel.panel.querySelector('[data-status]').textContent, /edit failed/);
+    panel.dispose(); h.dom.window.close();
 });

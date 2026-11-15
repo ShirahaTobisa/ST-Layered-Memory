@@ -1,9 +1,7 @@
 import { scopeId, sourceTurns } from './store.js';
-import { configure, hash, publicConfig, vectorSignature } from './providers.js';
+import { configure, hash, publicConfig, vectorSignature, completionText } from './providers.js';
 import { recall, rawSearch, unpackEmbedding } from './search.js';
-import { roleText } from '../shared/model.js';
-
-const stripVector = ({ vector, vectorSignature, embeddingQ, embeddingDims, embeddingScale, embeddingEncoding, ...memory }) => memory;
+import { VERSION, roleText, stripVector, cleanText, eligibleGroups } from '../shared/model.js';
 
 function expectedChat(store, body) {
     const id = scopeId(body.scope), chat = store.chat(id);
@@ -24,7 +22,7 @@ export function registerRoutes(router, getEngine) {
             res.status(error.status || 400).json({ error: String(error.message).slice(0, 300) });
         }
     });
-    route('/status', async store => ({ version: '0.2.0', config: publicConfig(store.config) }));
+    route('/status', async store => ({ version: VERSION, config: publicConfig(store.config) }));
     route('/config', async (store, body) => ({ config: publicConfig(store.setConfig(body)) }));
     route('/models', async (store, body, engine) => {
         if (!['summary', 'embedding'].includes(body.provider)) throw new Error('未知模型类型');
@@ -39,11 +37,11 @@ export function registerRoutes(router, getEngine) {
             return { message: `向量模型可用，${vector.length} 维` };
         }
         const data = await engine.providers.request(config.summary, 'chat/completions', { model: config.summary.model, stream: false, temperature: 0, max_tokens: 32, messages: [{ role: 'user', content: '只回复 OK' }] });
-        if (!data.choices?.[0]?.message) throw new Error('接口没有返回聊天结果');
+        completionText(data);
         return { message: '总结模型接口可用' };
     });
     route('/state', async (store, body) => store.state(scopeId(body.scope)));
-    route('/sync', async (store, body) => store.sync(body.scope, body.messages, body.revision));
+    route('/sync', async (store, body) => store.sync(body.scope, body.messages, body.revision, body.parentChat));
     route('/pause', async (store, body) => {
         const { id } = expectedChat(store, body); store.pause(id, !!body.paused); return store.state(id);
     });
@@ -99,24 +97,31 @@ export function registerRoutes(router, getEngine) {
     route('/import', async (store, body) => {
         const { id, chat } = expectedChat(store, body), backup = body.backup;
         if (backup?.version !== 1 || !Array.isArray(backup.memories) || backup.memories.length > 20000 || scopeId(backup.scope) !== id || backup.revision !== chat.revision) throw new Error('备份不属于当前聊天版本，未导入');
-        const turns = new Map(sourceTurns(chat.messages).filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
+        const allTurns = sourceTurns(chat.messages);
+        const turns = new Map(allTurns.filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
+        if (backup.memories.some(m => !['summary', 'group'].includes(m?.kind)) || new Set(backup.memories.map(m => m.id)).size !== backup.memories.length) throw new Error('备份记录类型或编号无效，未导入');
         const summaries = backup.memories.filter(m => m.kind === 'summary');
         const restored = new Map();
         for (const m of summaries) {
             const turn = turns.get(m.id);
-            if (!turn || turn.sourceHash !== m.sourceHash || typeof m.summary !== 'string' || !m.summary.trim() || m.summary.length > 20000) throw new Error('备份来源或正文不匹配，未导入');
-            restored.set(m.id, { ...m, id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: m.userText || roleText(turn.user, false), enabled: m.enabled !== false });
+            if (!turn || turn.sourceHash !== m.sourceHash || typeof m.summary !== 'string' || !cleanText(m.summary) || m.summary.length > 20000) throw new Error('备份来源或正文不匹配，未导入');
+            restored.set(m.id, { ...stripVector(m), id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: roleText(turn.user), summary: cleanText(m.summary), enabled: m.enabled !== false });
         }
-        const groups = backup.memories.filter(m => m.kind === 'group');
-        for (const group of groups) {
-            const children = (group.children || []).map(childId => restored.get(childId));
-            if (children.length < 2 || children.some(child => !child) || typeof group.summary !== 'string' || !group.summary.trim() || group.summary.length > 20000) throw new Error('备份合并记忆来源不匹配，未导入');
+        const candidates = new Map(eligibleGroups(allTurns, restored).map(group => [hash(group.ids), group]));
+        const originals = new Map(summaries.map(m => [m.id, m]));
+        const groups = backup.memories.filter(m => m.kind === 'group').map(group => {
+            const candidate = candidates.get(group.id);
+            if (!candidate || JSON.stringify(group.children) !== JSON.stringify(candidate.children.map(m => m.id)) || typeof group.summary !== 'string' || !cleanText(group.summary) || group.summary.length > 20000) throw new Error('备份合并记忆来源不匹配，未导入');
+            const children = candidate.children.map(m => originals.get(m.id));
             const expectedSourceHash = hash(children.map(child => [child.id, child.summary, child.enabled]));
             if (group.sourceHash !== expectedSourceHash) throw new Error('备份合并记忆已变化，未导入');
-        }
+            return { ...stripVector(group), ids: candidate.ids, turn: candidate.start, end: candidate.end,
+                sourceUserIds: candidate.children.flatMap(m => m.sourceUserIds), sourceAssistantIds: candidate.children.flatMap(m => m.sourceAssistantIds),
+                sourceHash: hash(candidate.children.map(m => [m.id, m.summary, m.enabled])), summary: cleanText(group.summary), enabled: group.enabled !== false };
+        });
         store.db.transaction(() => {
             for (const memory of restored.values()) store.put(id, memory);
-            for (const group of groups) store.put(id, { ...group, ids: [...new Set(group.ids || group.sourceMemories?.flatMap(memory => memory.ids || []) || [])], enabled: group.enabled !== false, recipe: 'lm-1.9.5' });
+            for (const group of groups) store.put(id, group);
             store.schedule(id);
         })();
         return { ...store.state(id), restored: restored.size + groups.length };

@@ -22,6 +22,7 @@ export function unpackEmbedding(memory) {
 }
 
 export async function recall(store, id, query, providers) {
+    query = cleanText(query);
     const config = store.config, all = store.memories(id);
     const disabled = new Set(all.filter(m => m.kind === 'group' && !m.enabled).flatMap(m => m.children));
     const memories = all.filter(m => m.kind === 'summary' && m.enabled && !disabled.has(m.id) && m.vectorSignature === vectorSignature(config) && unpackEmbedding(m).length);
@@ -44,7 +45,7 @@ export function rawSearch(messages, query, limit = 5) {
     const results = [];
     floorsFrom(messages).filter(floor => floor.role !== 'system').forEach((floor, index) => {
         if (floor.messages.some(m => m.blocked)) return;
-        const original = cleanText(roleText(floor.messages, false)).slice(0, 5000), lower = original.toLowerCase();
+        const original = roleText(floor.messages), lower = original.toLowerCase();
         if (!original || original.startsWith('[角色记忆')) return;
         const matchedTerms = terms.filter(term => lower.includes(term.toLowerCase()));
         if (!matchedTerms.length) return;

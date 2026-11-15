@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { hash } from './providers.js';
 import { packEmbedding } from './search.js';
+import { cleanText } from '../shared/model.js';
 
 export class Engine {
     constructor(store, providers) { this.store = store; this.providers = providers; this.active = new Map(); this.closed = false; }
@@ -8,8 +9,8 @@ export class Engine {
     wake() {
         if (this.closed || this.fault) return;
         const { db } = this.store;
-        for (const [id, task] of this.active) {
-            if (task.rows.some(row => { const saved = this.store.job(row.id); return !saved || saved.status !== 'running' || saved.lease !== task.lease; })) task.controller.abort();
+        for (const task of this.active.values()) {
+            if (task.rows.some(row => !this.current(row, task))) task.controller.abort();
         }
         while (this.active.size < this.store.config.concurrency) {
             const row = db.prepare("SELECT j.* FROM jobs j JOIN chats c ON c.id=j.chat_id WHERE j.status='queued' AND c.paused=0 ORDER BY CASE j.kind WHEN 'summary' THEN 0 WHEN 'embedding' THEN 1 ELSE 2 END,j.rowid LIMIT 1").get();
@@ -28,49 +29,58 @@ export class Engine {
         }
     }
 
+    current(row, task) {
+        const saved = this.store.job(row.id);
+        return !this.closed && saved?.status === 'running' && saved.lease === task.lease;
+    }
+
+    fail(task, error) {
+        const interrupted = task.controller.signal.aborted;
+        for (const row of task.rows) if (this.current(row, task)) {
+            // A changed item cancels the shared request, not its unaffected neighbours.
+            this.store.db.prepare('UPDATE jobs SET status=?,lease=NULL,error=? WHERE id=?').run(
+                interrupted ? 'queued' : 'error', interrupted ? null : error.name === 'TimeoutError' ? '模型响应超时，可手动重试' : String(error.message).slice(0, 250), row.id);
+        }
+    }
+
     async run(row, task) {
         if (row.kind === 'embedding') return this.embedBatch(task);
         const input = JSON.parse(row.input), config = structuredClone(this.store.config);
-        const current = () => {
-            const saved = this.store.job(row.id);
-            return !this.closed && saved?.status === 'running' && saved.lease === task.lease;
-        };
+        let result;
         try {
             if (input.prompt.length > 200000) throw new Error('本轮文本过长，需手动整理；原文保留');
-            const result = await this.providers.summarize(config, input, task.controller.signal);
-            if (!current()) return;
-            this.store.db.transaction(() => {
-                this.store.put(row.chat_id, { ...input.memory, summary: result, model: config.summary.model, updated: Date.now() });
-                this.store.db.prepare("UPDATE jobs SET status='done',lease=NULL,input='{}' WHERE id=?").run(row.id);
-                this.store.schedule(row.chat_id);
-            })();
-        } catch (error) {
-            if (current()) this.store.db.prepare("UPDATE jobs SET status='error',lease=NULL,error=? WHERE id=?").run(
-                task.controller.signal.aborted ? '任务已停止' : error.name === 'TimeoutError' ? '模型响应超时，可手动重试' : String(error.message).slice(0, 250), row.id);
-        }
+            result = cleanText(await this.providers.summarize(config, input, task.controller.signal));
+            if (!result) throw new Error('总结未返回有效正文，保留原文');
+        } catch (error) { this.fail(task, error); return; }
+        if (!this.current(row, task)) return;
+        // Storage failures must reach wake() and stop the worker, not become model errors.
+        this.store.db.transaction(() => {
+            this.store.put(row.chat_id, { ...input.memory, summary: result, model: config.summary.model, updated: Date.now() });
+            this.store.db.prepare("UPDATE jobs SET status='done',lease=NULL,input='{}' WHERE id=?").run(row.id);
+            this.store.schedule(row.chat_id);
+        })();
     }
 
     async embedBatch(task) {
         const inputs = task.rows.map(row => JSON.parse(row.input));
-        const current = row => { const saved = this.store.job(row.id); return !this.closed && saved?.status === 'running' && saved.lease === task.lease; };
+        let packed;
         try {
             const vectors = await this.providers.embed(structuredClone(this.store.config), inputs.map(input => input.prompt), task.controller.signal);
             if (vectors.length !== inputs.length) throw new Error('向量数量不匹配');
-            const packed = vectors.map(packEmbedding);
-            this.store.db.transaction(() => {
-                task.rows.forEach((row, index) => {
-                    if (!current(row)) return;
-                    const input = inputs[index], memory = this.store.memories(row.chat_id).find(m => m.id === input.key);
-                    if (!memory || hash(memory.summary) !== input.sourceHash) return;
-                    delete memory.vector;
-                    this.store.put(row.chat_id, { ...memory, ...packed[index], vectorSignature: input.config });
-                    this.store.db.prepare("UPDATE jobs SET status='done',lease=NULL,input='{}' WHERE id=?").run(row.id);
-                });
-                this.store.schedule(task.rows[0].chat_id);
-            })();
-        } catch (error) {
-            for (const row of task.rows) if (current(row)) this.store.db.prepare("UPDATE jobs SET status='error',lease=NULL,error=? WHERE id=?").run(task.controller.signal.aborted ? '任务已停止' : String(error.message).slice(0, 250), row.id);
-        }
+            packed = vectors.map(packEmbedding);
+        } catch (error) { this.fail(task, error); return; }
+        this.store.db.transaction(() => {
+            const memories = new Map(this.store.memories(task.rows[0].chat_id).map(memory => [memory.id, memory]));
+            task.rows.forEach((row, index) => {
+                if (!this.current(row, task)) return;
+                const input = inputs[index], memory = memories.get(input.key);
+                if (!memory || hash(memory.summary) !== input.sourceHash) return;
+                delete memory.vector;
+                this.store.put(row.chat_id, { ...memory, ...packed[index], vectorSignature: input.config });
+                this.store.db.prepare("UPDATE jobs SET status='done',lease=NULL,input='{}' WHERE id=?").run(row.id);
+            });
+            this.store.schedule(task.rows[0].chat_id);
+        })();
     }
 
     async close() {

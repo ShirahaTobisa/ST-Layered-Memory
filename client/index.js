@@ -1,4 +1,4 @@
-import { KEY, DEFAULTS } from '../shared/model.js';
+import { KEY, DEFAULTS, VERSION } from '../shared/model.js';
 import { createRuntime } from './runtime.js';
 
 const command = (name, label, style = '') => `<button type="button" data-action="${name}" class="${style}">${label}</button>`;
@@ -11,7 +11,7 @@ export function mountMemoryPanel(getContext, host = window) {
     document.querySelector('#extensions_settings')?.append(launcher);
     const panel = document.createElement('dialog'); panel.id = 'layered-memory';
     panel.setAttribute('aria-labelledby', 'lm-title');
-    panel.innerHTML = `<header class="lm-header"><div><small>LAYERED MEMORY · 0.2.0</small><h2 id="lm-title">记住经历，接着故事</h2></div><div class="lm-actions"><label class="lm-switch"><input data-enabled type="checkbox">启用记忆</label>${command('close', '关闭')}</div></header>
+    panel.innerHTML = `<header class="lm-header"><div><small>LAYERED MEMORY · ${VERSION}</small><h2 id="lm-title">记住经历，接着故事</h2></div><div class="lm-actions"><label class="lm-switch"><input data-enabled type="checkbox">启用记忆</label>${command('close', '关闭')}</div></header>
 <div class="lm-layout"><nav class="lm-nav" aria-label="记忆设置分区">
 <button type="button" data-tab="connection" aria-pressed="true">连接与模型</button><button type="button" data-tab="rules" aria-pressed="false">记忆规则</button><button type="button" data-tab="memories" aria-pressed="false">记忆管理</button><button type="button" data-tab="context" aria-pressed="false">本轮上下文</button></nav>
 <main class="lm-content"><form id="lm-settings" data-settings>
@@ -108,7 +108,11 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             row.querySelector('strong').textContent = `第 ${memory.turn}${memory.end ? `–${memory.end}` : ''} 轮 · ${memory.kind === 'group' ? '合并' : '逐轮'}${memory.indexed ? ' · 已索引' : ''}`;
             row.querySelector('.lm-summary').textContent = memory.summary;
             const input = row.querySelector('input'); input.checked = memory.enabled;
-            input.onchange = () => action(async () => { await runtime.request('edit', { id: memory.id, enabled: input.checked }); await refreshMemories(); });
+            input.onchange = () => {
+                const enabled = input.checked;
+                input.checked = memory.enabled;
+                action(async () => { await runtime.request('edit', { id: memory.id, enabled }); await refreshMemories(); });
+            };
             const text = row.querySelector('textarea'); text.value = drafts.get(memory.id) ?? memory.summary;
             if (drafts.has(memory.id)) row.querySelector('details').open = true;
             text.oninput = () => drafts.set(memory.id, text.value);
@@ -153,7 +157,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             dirty = true; status('已恢复默认规则，点击保存生效');
         },
         sync: async () => { await runtime.sync(); await refreshMemories(); }, pause: async () => renderState(await runtime.request('pause', { paused: !paused })),
-        retry: async () => { await runtime.sync(); renderState(await runtime.request('retry')); },
+        retry: async () => { const target = runtime.target; await runtime.sync({ target }); renderState(await runtime.request('retry', {}, target)); },
         approve: async () => { if (host.confirm('确认最后一条回复已经完整，可以用于记忆？')) renderState(await runtime.approveLatest()); },
         reindex: async () => { if (host.confirm('重建当前聊天的全部向量？会重新调用向量模型，原总结保留。')) renderState(await runtime.request('reindex')); },
         rebuild: async () => { if (host.confirm('删除当前聊天已有记忆并按当前提示词重新整理？手动修改也会被替换，并重新调用模型。建议先导出备份。')) { await runtime.request('rebuild'); drafts.clear(); await refreshMemories(); } },
@@ -165,7 +169,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     for (const button of panel.querySelectorAll('[data-action]')) button.onclick = () => action(commands[button.dataset.action]);
     select('[data-import]').onchange = event => action(async () => { const file = event.target.files[0]; if (!file) return; if (file.size > 20 * 1024 * 1024) throw new Error('备份文件超过 20 MiB'); const backup = JSON.parse(await file.text()); if (host.confirm('恢复备份中与当前聊天来源匹配的记忆？')) { await runtime.request('import', { backup }); await refreshMemories(); } event.target.value = ''; });
     select('[data-filter]').onsubmit = event => { event.preventDefault(); filter = { query: event.target.elements.query.value, kind: event.target.elements.kind.value }; offset = 0; action(refreshMemories); };
-    select('[data-search]').onsubmit = event => { event.preventDefault(); action(async () => { await runtime.sync(); const data = await runtime.request('search', { query: event.target.elements.query.value }); select('[data-results]').textContent = data.matches.map(m => `第 ${m.floor} 楼 · ${m.name}\n${m.text}`).join('\n\n') || '没有命中'; }); };
+    select('[data-search]').onsubmit = event => { event.preventDefault(); action(async () => { const target = runtime.target; await runtime.sync({ target }); const data = await runtime.request('search', { query: event.target.elements.query.value }, target); select('[data-results]').textContent = data.matches.map(m => `第 ${m.floor} 楼 · ${m.name}\n${m.text}`).join('\n\n') || '没有命中'; }); };
     getContext().eventSource.on(getContext().eventTypes.CHAT_CHANGED, () => { offset = 0; drafts.clear(); select('[data-enabled]').checked = !!runtime.enabled; select('[data-memories]').replaceChildren(); select('[data-preview]').replaceChildren(); select('[data-used]').textContent = '尚未生成'; select('[data-results]').textContent = ''; if (panel.open && getContext().chatId) action(refreshMemories); });
     const poll = host.setInterval(() => { if (panel.open && !busy && runtime.session) action(async () => { if (!select('[data-view="memories"]').hidden && !select('[data-memories]').contains(document.activeElement)) await refreshMemories(); else renderState(await runtime.request('state')); }); }, 4000);
     const dispose = () => { host.clearInterval(poll); panel.remove(); launcher.remove(); };

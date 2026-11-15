@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { Store } from '../server/store.js';
+import { Store, scopeId } from '../server/store.js';
 import { Engine } from '../server/engine.js';
 import { registerRoutes } from '../server/routes.js';
+import { vectorSignature } from '../server/providers.js';
 
 test('authenticated HTTP routes isolate users, reject stale mutations and import only verified sources', async t => {
+    fs.mkdirSync('test-output', { recursive: true });
     const root = fs.mkdtempSync(path.resolve('test-output/http-')), engines = new Map();
     const getEngine = userRoot => {
         if (!engines.has(userRoot)) engines.set(userRoot, new Engine(new Store(path.join(userRoot, 'memory.sqlite')), { summarize: async () => 'source-checked summary', embed: async () => [[1, 0]] }));
@@ -40,6 +42,16 @@ test('authenticated HTTP routes isolate users, reject stale mutations and import
     assert.equal(backup.memories.length, 1); assert.ok(!JSON.stringify(backup).includes('key'));
     await call('clear', ref); assert.equal((await call('state', { scope })).data.total, 0);
     const restored = await call('import', { ...ref, backup }); assert.equal(restored.data.restored, 1);
+    const staleIndex = structuredClone(backup);
+    Object.assign(staleIndex.memories[0], { summary: '<reasoning>private</reasoning>可用正文', userText: 'invented input',
+        embeddingQ: 'fwA=', embeddingDims: 2, vectorSignature: vectorSignature(getEngine(path.join(root, 'a')).store.config) });
+    assert.equal((await call('import', { ...ref, backup: staleIndex })).status, 200);
+    const verified = (await call('export', ref)).data.memories[0];
+    assert.equal(verified.summary, '可用正文'); assert.equal(verified.userText, 'query');
+    const actual = getEngine(path.join(root, 'a')).store.memories(scopeId(scope))[0];
+    assert.equal(actual.embeddingQ, undefined); assert.equal(actual.vectorSignature, undefined);
+    const thinkingOnly = structuredClone(backup); thinkingOnly.memories[0].summary = '<think>private</think>';
+    assert.equal((await call('import', { ...ref, backup: thinkingOnly })).status, 400);
     const altered = structuredClone(backup); altered.memories[0].sourceHash = 'wrong';
     assert.equal((await call('import', { ...ref, backup: altered })).status, 400);
     assert.equal((await call('state', { scope })).data.total, 1);
@@ -65,4 +77,18 @@ test('authenticated HTTP routes isolate users, reject stale mutations and import
     await call('clear', longRef);
     const longRestored = await call('import', { ...longRef, backup: longBackup });
     assert.equal(longRestored.data.restored, longCount);
+    const wrongGroup = structuredClone(longBackup);
+    const group = wrongGroup.memories.find(m => m.kind === 'group');
+    group.sourceAssistantIds = ['long-a30']; group.sourceUserIds = ['long-u30']; group.turn = 31; group.end = 40;
+    assert.equal((await call('import', { ...longRef, backup: wrongGroup })).status, 200);
+    const corrected = (await call('export', longRef)).data.memories.find(m => m.kind === 'group');
+    assert.equal(corrected.turn, 1); assert.equal(corrected.end, 5);
+    assert.ok(!corrected.sourceAssistantIds.includes('long-a30'));
+    group.id = wrongGroup.memories.find(m => m.kind === 'summary').id;
+    assert.equal((await call('import', { ...longRef, backup: wrongGroup })).status, 400);
+    assert.equal((await call('state', { scope: longScope })).data.total, longCount);
+
+    const engine = getEngine(path.join(root, 'a'));
+    engine.providers.request = async () => ({ choices: [{ message: { content: '', reasoning_content: 'no usable body' } }] });
+    assert.equal((await call('check', { provider: 'summary' })).status, 400);
 });

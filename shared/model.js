@@ -1,4 +1,5 @@
 export const KEY = 'layered_memory';
+export const VERSION = '0.2.1';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
     version: 2, mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5,
@@ -6,11 +7,43 @@ export const DEFAULTS = {
     embedding: { url: '', model: '', key: '' },
 };
 
+// SillyTavern also uses is_system for hidden ordinary dialogue.
+export function memoryRole(message) {
+    const type = message.extra?.type;
+    if (message.extra?.tool_invocations?.length || (message.is_system &&
+        (message.name === 'SillyTavern System' || (type && type !== 'narrator')))) return 'system';
+    return message.is_user ? 'user' : 'assistant';
+}
+
+const HIDDEN_TAGS = new Set(['think', 'thinking', 'thought', 'thoughts', 'cot', 'analysis', 'reasoning',
+    'scratchpad', 'reflection', 'planning', 'konatan_planning',
+    'next_response', 'ui_template_state_context', 'ui_template_updates']);
+
 export function cleanText(text) {
-    return String(text || '').replace(/<(think|thinking|cot|analysis)>[\s\S]*?(?:<\/\1>|$)/gi, '')
-        .replace(/<next_response>[\s\S]*?(?:<\/next_response>|$)/gi, '')
-        .replace(/<ui_template_state_context>[\s\S]*?(?:<\/ui_template_state_context>|$)/gi, '')
-        .replace(/<ui_template_updates>[\s\S]*?(?:<\/ui_template_updates>|$)/gi, '').trim();
+    const value = String(text || ''), output = [], stack = [];
+    const tags = /<(\/?)([a-z][\w:.-]*~?)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
+    let cursor = 0;
+    for (const match of value.matchAll(tags)) {
+        const name = match[2].toLowerCase().replace(/~$/, '');
+        if (!HIDDEN_TAGS.has(name)) continue;
+        if (!stack.length) output.push(value.slice(cursor, match.index));
+        if (match[1]) {
+            const opened = stack.lastIndexOf(name);
+            if (opened >= 0) stack.length = opened;
+        } else if (!/\/\s*>$/.test(match[0])) stack.push(name);
+        cursor = match.index + match[0].length;
+    }
+    if (!stack.length) output.push(value.slice(cursor));
+    return output.join('').trim();
+}
+
+export const stripVector = ({ vector, vectorSignature, embeddingQ, embeddingDims, embeddingScale, embeddingEncoding, ...memory }) => memory;
+
+export function cleanMemory(memory) {
+    const summary = cleanText(memory.summary);
+    const userText = memory.userText === undefined ? undefined : cleanText(memory.userText);
+    if (summary === memory.summary && userText === memory.userText) return memory;
+    return { ...stripVector(memory), summary, ...(userText === undefined ? {} : { userText }) };
 }
 
 export function floorsFrom(messages) {
@@ -26,7 +59,10 @@ export function floorsFrom(messages) {
 
 export const roleText = (messages, clean = true) => {
     const names = new Set(messages.map(m => m.name).filter(Boolean));
-    return messages.map(m => `${names.size > 1 ? `${m.name || m.role}：` : ''}${clean ? cleanText(m.text) : m.text || ''}`).filter(Boolean).join('\n\n');
+    return messages.map(m => {
+        const text = clean ? cleanText(m.text) : m.text || '';
+        return text ? `${names.size > 1 ? `${m.name || m.role}：` : ''}${text}` : '';
+    }).filter(Boolean).join('\n\n');
 };
 
 export function turnsFrom(messages) {
@@ -56,6 +92,7 @@ export function turnsFrom(messages) {
 }
 
 export function sourceData(turn) {
+    // Hiding changes prompt visibility, not the identity or contents of a memory.
     return [...turn.user, ...turn.assistant].map(m => [m.id, m.role, m.name, m.text, m.swipe, !!m.blocked, !!m.protected]);
 }
 
@@ -66,7 +103,7 @@ export function eligibleGroups(turns, memories) {
         const subset = turns.slice(start, start + 5);
         const children = subset.flatMap(turn => {
             if (!turn.eligible || turn.empty) return [];
-            return [memories.get(turn.key)].filter(Boolean);
+            return [memories.get(turn.key)].filter(memory => memory && memory.enabled !== false);
         });
         const complete = subset.every(turn => turn.empty || memories.has(turn.key));
         if (!complete || children.length < 2) continue;

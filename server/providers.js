@@ -43,6 +43,15 @@ export function publicConfig(config) {
 
 const endpoint = (url, suffix) => url.endsWith(`/${suffix}`) ? url : `${url}/${suffix}`;
 
+export function completionText(data) {
+    const choice = data.choices?.[0];
+    if (['length', 'content_filter', 'tool_calls', 'function_call'].includes(choice?.finish_reason) || choice?.message?.tool_calls?.length) throw new Error('总结没有完整结束，保留原文');
+    const raw = choice?.message?.content;
+    const text = Array.isArray(raw) ? raw.filter(part => part?.type === 'text').map(part => part.text || '').join('') : raw;
+    if (typeof text !== 'string' || !cleanText(text)) throw new Error('总结未返回有效正文，保留原文');
+    return cleanText(text);
+}
+
 export class Providers {
     constructor(fetcher = fetch) { this.fetcher = fetcher; }
 
@@ -63,12 +72,9 @@ export class Providers {
         const data = await this.request(config.summary, 'chat/completions', {
             model: config.summary.model, temperature: 0.2, stream: false, messages,
         }, signal);
-        const choice = data.choices?.[0];
-        const raw = choice?.message?.content;
-        const text = Array.isArray(raw) ? raw.map(part => part?.text || part?.content || '').join('') : raw;
-        if (typeof text !== 'string' || !text.trim()) throw new Error('总结未返回有效正文，保留原文');
+        const text = completionText(data);
         if (text.length > 20000) throw new Error('总结过长，保留原文');
-        const summary = cleanText(text).replace(/^```(?:text|markdown)?\s*/i, '').replace(/\s*```$/, '')
+        const summary = text.replace(/^```(?:text|markdown)?\s*/i, '').replace(/\s*```$/, '')
             .replace(/^(?:最新对话总结|总结)[:：]\s*/i, '').trim().replace(/\n{3,}/g, '\n\n');
         if (!summary) throw new Error('副模型没有返回有效总结');
         return summary;

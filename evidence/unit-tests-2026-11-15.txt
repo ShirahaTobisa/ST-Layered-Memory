@@ -1,0 +1,72 @@
+ST-Layered-Memory 0.2.1 local verification
+Date: 2026-11-15 Asia/Tokyo
+Node: v24.21.0
+Command: npm test
+Model calls: local mocks only
+
+npm notice run st-layered-memory@0.2.1 test
+npm notice run node --test test/*.test.js
+✔ turns preserve speaker identity, adjacent user input, greeting and incomplete exclusion (1.1537ms)
+✔ durable handoff deduplicates retries, applies summaries and preserves raw snapshots (89.4039ms)
+✔ changed/swiped/deleted sources invalidate only their own summaries; stale pages conflict (41.5376ms)
+✔ obsolete model results cannot overwrite edited chat or stopped work (63.0623ms)
+✔ persistent storage failure stops the worker without pretending a summary was saved (16.959ms)
+✔ server restart requeues in-flight tasks without requiring an open page (33.8788ms)
+✔ v0.1 database upgrade preserves edited summaries, disabled merged memories and a recovery copy (137.5546ms)
+✔ five-turn compaction skips empty turns, retains all valid per-turn sources and allows retry (106.3471ms)
+✔ branches reuse exact target sources only; unrelated imports do not inherit memories (26.5285ms)
+✔ embedding failure retains summaries; switching embedding config never resummarizes (30.0592ms)
+✔ separate user stores do not share snapshots, keys, or task results (26.8681ms)
+✔ provider accepts complete text with optional finish metadata, rejects malformed embeddings and invalid model URLs (13.944ms)
+✔ fixture output matches postprocessed replacement positions (3.871ms)
+✔ summary request layout and nonzero vector encoding are stable (1.4944ms)
+✔ unknown sources and protected user attachments cannot be removed by a grouped memory (0.2419ms)
+✔ retrieval includes recent memories and falls back to summaries on vector failure; raw search finds omitted detail (77.8121ms)
+✔ prompt replacement has no independent memory cap and leaves preset/tool messages intact (0.7554ms)
+✔ ambiguous text, media and protected messages are never blindly replaced (0.155ms)
+✔ a repeated old source cannot claim the single matching message left in the final request (0.1383ms)
+✔ thinking blocks stay out of summaries, vectors and long original-text searches (21.9414ms)
+✔ summary content excludes reasoning parts and refuses explicitly truncated results (0.9057ms)
+✔ disabled summaries cannot return through automatic merged memories (99.3968ms)
+✔ branches inherit only their declared parent including manual group edits (101.9282ms)
+✔ failed configuration writes restore the in-memory configuration too (13.4847ms)
+✔ uncompleted earlier replies are not sent as background for a later summary (13.3671ms)
+✔ editing one source during an embedding batch requeues unaffected memories (29.8575ms)
+✔ startup cleans legacy thinking and stale vectors even in a paused chat (29.7978ms)
+✔ hide and unhide preserve edited summaries, disabled states and vectors (143.2465ms)
+✔ hidden histories inject summaries in both modes without restoring raw text (0.9645ms)
+✔ a hidden merged memory is injected once and hiding one side keeps visible text intact (0.3046ms)
+✔ hidden sources still invalidate memories when edited, swiped or deleted (31.5783ms)
+✔ authenticated HTTP routes isolate users, reject stale mutations and import only verified sources (235.5151ms)
+✔ frontend source IDs and server revision survive reload; stale client never adopts remote revision blindly (17.7992ms)
+✔ unfinished Gemini/tool-stage messages are excluded, and edited replies remain excluded until confirmed (1.5718ms)
+✔ quiet generations do not alter main prompt or finish an ongoing nonstream generation (0.7219ms)
+✔ disabled extension leaves requests alone; backend errors leave original enabled requests intact (0.4ms)
+✔ chat switch during handoff cannot overwrite new chat metadata or attribute old results to it (0.54ms)
+✔ ST generation-ended can precede message-received; successful final message still hands off (0.7966ms)
+✔ stream failures stay excluded after lifecycle ends; manual confirmation applies only to current text (0.6852ms)
+✔ chat-specific switches persist independently and pause handed-off work (0.6909ms)
+✔ ST history hook compresses before prompt budgeting while preserving WI input and recent speaker/media metadata (1.4723ms)
+✔ nonstream and continue replies wait for generation completion and persist cancellation (1.1633ms)
+✔ a queued chat sync and enable action never move to a newly opened chat (0.3147ms)
+✔ group replies remain blocked until the whole group batch finishes (0.4951ms)
+✔ automatic handoff checks backend version before writing snapshots (0.1696ms)
+✔ recall added after history compression respects the final prompt capacity (0.5353ms)
+✔ history plans are discarded if sources change while retrieval is pending (0.3862ms)
+✔ the fallback can compress the first request before source IDs were saved (0.5114ms)
+✔ legacy source IDs survive migration and a branch declares its actual parent (0.3268ms)
+✔ disabling waits for in-flight handoff before pausing its latest revision (3.3959ms)
+✔ hidden dialogue keeps its original role while system notices, comments and tools stay excluded (0.3685ms)
+✔ the main history hook uses hidden memories before token budgeting without unhiding messages (0.678ms)
+✔ hiding a reply during generation does not bypass its completion checks (0.4235ms)
+✔ settings panel exposes Anima-style model, rules, memory and context controls (68.2196ms)
+✔ failed config saves preserve the draft; successful saves clear the key input (23.0527ms)
+✔ a failed memory switch does not display an unsaved enabled state (21.2313ms)
+ℹ tests 56
+ℹ suites 0
+ℹ pass 56
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1241.1867
