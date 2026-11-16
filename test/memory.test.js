@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Store, scopeId, sourceTurns } from '../server/store.js';
+import { registerRoutes } from '../server/routes.js';
 import { Engine } from '../server/engine.js';
 import { Providers, configure, publicConfig, vectorSignature, summaryMessages, hash } from '../server/providers.js';
 import { recall, rawSearch, cosine, packEmbedding } from '../server/search.js';
 import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt, enhancedMemoryRecallDescription } from '../shared/summary-prompts.js';
-import { turnsFrom, sourceData, cleanText, DEFAULTS } from '../shared/model.js';
-import { buildPrompt, compressHistory } from '../client/prompt.js';
+import { turnsFrom, sourceData, cleanText, roleText, DEFAULTS } from '../shared/model.js';
+import { appendRecall, buildPrompt, compressHistory } from '../client/prompt.js';
 
 const scope = { actor: 'character:alice.png', chat: 'story', lineage: 'lineage-a' };
 const config = { summary: { url: 'http://model.local/v1', model: 'summary', key: 'private-test' } };
@@ -41,7 +42,7 @@ test('turns preserve speaker identity, adjacent user input, greeting and incompl
     data.push({ id: 'pending', role: 'user', text: '下一句' });
     const turns = turnsFrom(data);
     assert.equal(turns.length, 2); assert.equal(turns[0].user.length, 2); assert.equal(turns[0].assistant.length, 2);
-    assert.equal(turns[0].eligible, false); assert.match(turns[0].text, /另一角色/);
+    assert.equal(turns[0].eligible, false); assert.match(roleText(turns[0].assistant), /另一角色/);
 });
 
 test('durable handoff deduplicates retries, applies summaries and preserves raw snapshots', async t => {
@@ -363,8 +364,11 @@ test('uncompleted earlier replies are not sent as background for a later summary
     const { store } = fixture(t), data = messages(3);
     data[1].text = 'cancelled private draft'; data[1].blocked = true;
     store.sync(scope, data, null);
-    const jobs = store.db.prepare("SELECT input FROM jobs WHERE kind='summary'").all().map(row => JSON.parse(row.input));
-    assert.ok(jobs.every(job => !JSON.stringify(job).includes('cancelled private draft')));
+    const rows = store.db.prepare("SELECT * FROM jobs WHERE kind='summary'").all(), inputs = rows.map(row => store.input(row));
+    assert.equal(inputs.length, 2);
+    assert.ok(inputs.every(input => !JSON.stringify(input).includes('cancelled private draft')));
+    assert.deepEqual(inputs.map(input => input.contextTurns.map(turn => turn.number)).sort(), [[2], [2, 3]]);
+    assert.ok(rows.every(row => !/用户问题|角色经历/.test(row.input)));
 });
 
 test('editing one source during an embedding batch requeues unaffected memories', async t => {
@@ -471,4 +475,154 @@ test('hidden sources still invalidate memories when edited, swiped or deleted', 
     await settle(new Engine(store, provider));
     store.sync(scope, data.slice(2), state.revision);
     assert.ok(store.memories(id).every(m => !m.ids.includes('a0')));
+});
+
+test('a freshly read chat file replaces the snapshot; a page that fell behind is refused', t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(3);
+    const first = store.sync(scope, data.slice(0, 4), null), second = store.sync(scope, data, first.revision);
+    assert.equal(store.sync(scope, data.slice(0, 4), null).revision, first.revision);
+    assert.equal(store.chat(id).messages.length, 4);
+    assert.throws(() => store.sync(scope, messages(5), second.revision), error => error.status === 409);
+    const writes = () => store.db.prepare('SELECT total_changes() AS n').get().n, before = writes();
+    store.sync(scope, data.slice(0, 4), first.revision);
+    assert.equal(writes(), before);
+});
+
+test('unchanged messages can be handed over as bare ids', t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(3);
+    const first = store.sync(scope, data, null), edited = { ...data[5], text: '改过的回复' };
+    const second = store.sync(scope, [...data.slice(0, 5).map(m => m.id), edited], first.revision);
+    assert.deepEqual(store.chat(id).messages.map(m => m.text), [...data.slice(0, 5).map(m => m.text), '改过的回复']);
+    assert.throws(() => store.sync(scope, data.map(m => m.id), first.revision), error => error.status === 409);
+    assert.throws(() => store.sync({ ...scope, chat: 'never seen' }, ['u0'], null), error => error.status === 409);
+    assert.throws(() => store.sync(scope, ['missing', edited], second.revision), /来源 ID 无效/);
+    assert.equal(store.sync(scope, [...data.slice(0, 5), edited], null).revision, second.revision);
+});
+
+test('deleting a turn or shortening the chat only redoes the merged memory that lost a turn', async t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(46);
+    let merges = 0, state = store.sync(scope, data, null);
+    const engine = new Engine(store, { ...provider, summarize: async (config, input) => { merges += input.kind === 'group'; return provider.summarize(config, input); } });
+    await settle(engine);
+    const groups = () => store.memories(id).filter(m => m.kind === 'group').sort((a, b) => a.turn - b.turn);
+    const untouched = groups().slice(1).map(m => m.summary);
+    assert.deepEqual(groups().map(m => [m.turn, m.end]), [[1, 5], [6, 10], [11, 15], [16, 20]]);
+    merges = 0; data.splice(4, 2);
+    state = store.sync(scope, data, state.revision); await settle(engine);
+    assert.equal(merges, 1);
+    assert.deepEqual(groups().map(m => [m.turn, m.end]), [[1, 4], [5, 9], [10, 14], [15, 19]]);
+    assert.deepEqual(groups().slice(1).map(m => m.summary), untouched);
+    store.sync(scope, data.slice(0, -20), state.revision); await settle(engine);
+    assert.equal(merges, 1); assert.equal(groups().length, 4);
+});
+
+test('a renamed chat keeps its memories and a deleted chat stops all its work', async t => {
+    const { store } = fixture(t), id = scopeId(scope), renamed = { ...scope, chat: 'renamed' }, engine = new Engine(store, provider);
+    store.sync(scope, messages(3), null); await settle(engine);
+    store.edit(id, store.memories(id)[0].id, { summary: '手动改过的记忆' });
+    store.move(scope.actor, scope.chat, renamed.chat);
+    assert.equal(store.chat(id), null);
+    assert.ok(store.memories(scopeId(renamed)).some(m => m.summary === '手动改过的记忆'));
+    assert.equal(store.sync(renamed, messages(3), null).counts.queued || 0, 0);
+    // The page may hand the chat over under its new name before the rename arrives.
+    const again = { ...scope, chat: 'renamed again' };
+    store.sync(again, messages(3), null, renamed.chat);
+    store.move(scope.actor, renamed.chat, again.chat);
+    assert.equal(store.chat(scopeId(renamed)), null); assert.equal(store.memories(scopeId(again)).length, 3);
+    assert.equal(store.sync(again, messages(5), null).counts.queued, 2);
+    store.move(scope.actor, again.chat);
+    assert.equal(store.chat(scopeId(again)), null);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM jobs').get().n, 0);
+    await settle(engine);
+});
+
+test('summaries already merged are not sent to the page again', async t => {
+    const { store } = fixture(t), id = scopeId(scope), routes = new Map(), engine = new Engine(store, provider);
+    registerRoutes({ post: (path, handler) => routes.set(path, handler) }, () => engine);
+    const plan = body => new Promise(resolve => routes.get('/plan')({ user: { directories: { root: 'user' } }, body: { scope, ...body } }, { json: resolve, status: () => ({ json: resolve }) }));
+    store.setConfig({ mode: 'enhanced', embedding: { url: 'http://local/v1', model: 'embedding' } });
+    const state = store.sync(scope, messages(31), null); await settle(engine);
+    const merged = await plan({ revision: state.revision });
+    assert.equal(merged.groups.length, 1); assert.equal(merged.summaries.length, 26);
+    assert.ok(merged.summaries.every(m => !merged.groups[0].children.includes(m.id)));
+    // A summary rewritten while the search is running is delivered as it now is, and its old text is not recalled.
+    const last = store.memories(id).find(m => m.turn === 31);
+    engine.providers = { ...provider, embed: async (...args) => { engine.providers = provider; store.edit(id, last.id, { summary: '检索途中改写' }); return provider.embed(...args); } };
+    const during = await plan({ revision: state.revision, query: '用户问题' });
+    assert.equal(during.error, undefined);
+    assert.equal(during.summaries.find(m => m.id === last.id).summary, '检索途中改写');
+    assert.ok(during.recall.length); assert.ok(during.recall.every(m => m.id !== last.id));
+    await settle(engine);
+});
+
+test('recalled memories follow an input that was moved into a tool result', () => {
+    const memory = { turn: 3, score: 0.9, userText: '问 <钥匙>', summary: '钥匙在灯塔' };
+    const plain = [{ role: 'user', content: '旧问题' }, { role: 'assistant', content: '旧回复' }, { role: 'user', content: '钥匙呢' }];
+    const appended = appendRecall(plain, [memory]).messages;
+    assert.match(appended[2].content, /^钥匙呢\n\n<enhanced_memory_recall>[\s\S]*&lt;钥匙&gt;[\s\S]*<\/enhanced_memory_recall>$/);
+    assert.deepEqual(appended.slice(0, 2), plain.slice(0, 2));
+    const moved = [...plain.slice(0, 2), { role: 'user', content: '读取工具结果' },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call', type: 'function', function: { name: 'read_user_input', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'call', content: JSON.stringify({ source: 'user_input', text: '钥匙呢' }) }];
+    const result = appendRecall(moved, [memory]).messages;
+    assert.equal(result[2].content, '读取工具结果');
+    assert.match(JSON.parse(result[4].content).text, /^钥匙呢\n\n<enhanced_memory_recall>[\s\S]*钥匙在灯塔/);
+    assert.deepEqual(appendRecall(moved, []).messages, moved);
+});
+
+test('a reply emptied by the user\'s prompt regexes is replaced by its summary even among the recent floors', () => {
+    const source = messages(3), turns = sourceTurns(source);
+    const summaries = turns.map(t => ({ id: t.key, turn: t.number, ids: t.ids, sourceAssistantIds: t.assistantIds, summary: `记忆${t.number}`, enabled: true }));
+    const history = source.map(m => ({ id: m.id, role: m.role, content: m.id === 'a0' || m.id === 'u0' ? '' : m.text }));
+    const result = compressHistory(history, source, { summaries }, 20, true).messages;
+    assert.deepEqual(result.map(m => m.content), ['', '记忆1', ...source.slice(2).map(m => m.text)]);
+});
+
+test('summaries are written from the text the main model was shown; a changed view redoes nothing', async t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(2);
+    data[0] = { ...data[0], text: '问题<选项>甲乙丙</选项>', view: '问题' };
+    data[1] = { ...data[1], text: '剧情正文<状态栏>体力 3</状态栏>', view: '剧情正文' };
+    const inputs = [];
+    const engine = new Engine(store, { ...provider, summarize: async (config, input) => { inputs.push(input); return provider.summarize(config, input); } });
+    let state = store.sync(scope, data, null); await settle(engine);
+    const first = inputs.find(input => input.memory.turn === 1);
+    assert.deepEqual(first.contextTurns, [{ number: 1, user: '问题', assistant: '剧情正文' }]);
+    assert.equal(store.memories(id).find(m => m.turn === 1).userText, '问题');
+    const before = store.memories(id);
+    data[1] = { ...data[1], view: '换了正则以后的样子' };
+    state = store.sync(scope, data, state.revision);
+    assert.equal(state.counts.queued || 0, 0); assert.deepEqual(store.memories(id), before);
+    assert.equal(store.chat(id).messages[1].view, '换了正则以后的样子');
+    assert.match(rawSearch(store.chat(id).messages, '体力')[0].text, /状态栏/);
+});
+
+test('a rerank model picks the recalled memories when more candidates are found than fit', async t => {
+    const { store } = fixture(t), id = scopeId(scope);
+    store.setConfig({ mode: 'enhanced', embedding: { url: 'http://local/v1', model: 'embedding' } });
+    store.sync(scope, messages(14), null); await settle(new Engine(store, provider));
+    const asked = [], ranked = { ...provider, rerank: async (config, query, documents) => { asked.push([query, documents]); return documents.map((_, index) => index); } };
+    assert.deepEqual((await recall(store, id, '问题', ranked)).memories.map(m => m.turn), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    store.setConfig({ rerank: { url: 'http://local/v1', model: 'rerank', key: 'rerank-secret' } });
+    const picked = await recall(store, id, '问题', ranked);
+    assert.deepEqual(picked.memories.map(m => m.turn), [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    assert.equal(asked.length, 1); assert.equal(asked[0][0], '问题'); assert.equal(asked[0][1].length, 14);
+    assert.match(asked[0][1][0], /^用户原输入：\n用户问题 0\n\n本轮总结：\n/);
+    const failed = await recall(store, id, '问题', { ...provider, rerank: async () => { throw new Error('down'); } });
+    assert.deepEqual(failed.memories.map(m => m.turn), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]); assert.match(failed.warnings[0], /重排失败/);
+    assert.equal(publicConfig(store.config).rerank.hasKey, true); assert.ok(!JSON.stringify(publicConfig(store.config)).includes('rerank-secret'));
+    const p = new Providers(async (url, init) => { assert.match(url, /\/v1\/rerank$/); assert.equal(JSON.parse(init.body).top_n, 2); return Response.json({ results: [{ index: 1, relevance_score: 0.9 }, { index: 0, relevance_score: 0.2 }] }); });
+    assert.deepEqual(await p.rerank(store.config, '问', ['甲', '乙']), [0.2, 0.9]);
+    await assert.rejects(new Providers(async () => Response.json({ results: [] })).rerank(store.config, '问', ['甲']), /有效分数/);
+});
+
+test('a held turn gets no new summary but keeps the one it has', async t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(3), engine = new Engine(store, provider);
+    const hold = from => data.map((m, index) => m.role === 'assistant' && index >= from ? { ...m, held: true } : m);
+    let state = store.sync(scope, hold(2), null); await settle(engine);
+    assert.deepEqual(store.memories(id).map(m => m.turn), [1]);
+    state = store.sync(scope, hold(6), state.revision); await settle(engine);
+    assert.deepEqual(store.memories(id).map(m => m.turn).sort(), [1, 2, 3]);
+    const before = store.memories(id);
+    state = store.sync(scope, hold(0), state.revision);
+    assert.equal(state.counts.queued || 0, 0); assert.deepEqual(store.memories(id), before);
 });

@@ -2,9 +2,10 @@ import { KEY, DEFAULTS, VERSION } from '../shared/model.js';
 import { createRuntime } from './runtime.js';
 
 const command = (name, label, style = '') => `<button type="button" data-action="${name}" class="${style}">${label}</button>`;
-const providers = [['summary', '总结模型', '将每轮对话整理为记忆；基础和增强模式都需要。'], ['embedding', '向量模型', '增强模式使用，用当前输入找回相关的逐轮记忆。']];
+const providers = [['summary', '总结模型', '将每轮对话整理为记忆；基础和增强模式都需要。'], ['embedding', '向量模型', '增强模式使用，用当前输入找回相关的逐轮记忆。'],
+    ['rerank', '重排模型', '可选。增强模式找回的候选多于 10 条时，由它挑出最贴合的 10 条；接口是 /rerank，留空不用。']];
 
-export function mountMemoryPanel(getContext, host = window) {
+export function mountMemoryPanel(getContext, host = window, view) {
     const document = host.document;
     const launcher = document.createElement('button'); launcher.type = 'button'; launcher.className = 'menu_button lm-launcher';
     launcher.innerHTML = '<b>分层记忆设置</b><small>未连接服务器</small>';
@@ -30,7 +31,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
 <section data-view="memories" hidden><div class="lm-row"><div class="lm-grow"><h3>记忆管理</h3><p data-chat class="lm-muted">请打开一段聊天</p></div>${command('sync', '刷新记录')}</div>
 <p>逐轮 <b data-count="summaries">0</b> · 合并 <b data-count="groups">0</b> · 已索引 <b data-count="indexed">0</b></p>
 <p data-progress role="status">尚未交付聊天</p><div data-errors class="lm-log lm-danger"></div><p data-legacy class="lm-muted" hidden></p>
-<div class="lm-row">${command('retry', '补录 / 重试', 'lm-primary')}${command('pause', '停止后台任务')}${command('approve', '确认最后回复完整')}</div>
+<div class="lm-row">${command('retry', '补录 / 重试', 'lm-primary')}${command('pause', '停止后台任务')}</div>
 <form data-filter class="lm-row"><input name="query" class="lm-grow" placeholder="搜索记忆正文" aria-label="搜索记忆正文"><select name="kind" aria-label="记忆类型"><option value="all">全部记忆</option><option value="summary">逐轮总结</option><option value="group">合并总结</option></select><button type="submit">筛选</button></form><div data-memories></div>
 <div class="lm-row">${command('previous', '上一页')}<span data-page class="lm-grow">1 / 1</span>${command('next', '下一页')}</div>
 <details class="lm-card"><summary>备份与维护</summary><p class="lm-muted">导出当前聊天的记忆，不包含 API Key。数据库完整备份需停止酒馆后复制用户目录中的 layered-memory 文件夹。</p><div class="lm-row">${command('export', '导出记忆')}${command('import', '恢复备份')}${command('reindex', '重建向量')}${command('rebuild', '重新整理全部')}${command('clear', '清空当前记忆', 'lm-danger')}</div></details><input data-import type="file" accept="application/json,.json" hidden></section>
@@ -40,18 +41,18 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     document.body.append(panel);
     const select = query => panel.querySelector(query), settings = () => getContext().extensionSettings[KEY];
     const drafts = new Map();
-    let offset = 0, total = 0, busy = false, dirty = false, paused = false, filter = { query: '', kind: 'all' };
+    let offset = 0, total = 0, busy = false, dirty = false, paused = false, notice = '', filter = { query: '', kind: 'all' };
     const status = text => { select('[data-status]').textContent = text; launcher.querySelector('small').textContent = text; };
     const runtime = createRuntime(getContext, host, (type, data) => {
-        if (type === 'error') status(data);
+        if (type === 'error') status(notice = data);
         if (type === 'state') renderState(data);
         if (type === 'prompt') {
-            status(data.reason);
+            status(notice = data.reason);
             select('[data-used]').textContent = [...data.used.map(m => `第 ${m.turn}${m.end ? `–${m.end}` : ''} 轮 · ${(m.why || []).join('、')}\n${m.summary || ''}`), ...(data.warnings || [])].join('\n\n') || '本轮保留原文，没有注入记忆';
             const preview = select('[data-preview]'); preview.replaceChildren();
             for (const message of data.preview || []) { const item = document.createElement('p'); item.textContent = `${message.role}\n${typeof message.content === 'string' ? message.content : '工具或多媒体消息'}`; preview.append(item); }
         }
-    });
+    }, view);
     function renderState(data) {
         for (const node of panel.querySelectorAll('[data-count]')) node.textContent = data[node.dataset.count] || 0;
         const c = data.counts || {};
@@ -101,7 +102,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         select('[data-action="previous"]').disabled = offset === 0;
         select('[data-action="next"]').disabled = offset + 10 >= total;
         const container = select('[data-memories]'); container.replaceChildren();
-        if (!data.items.length) container.textContent = '暂无匹配的记忆。完成对话后自动整理，也可点击“补录 / 重试”。';
+        if (!data.items.length) container.textContent = '暂无匹配的记忆。最新两轮要等后面聊完才整理；也可点击“补录 / 重试”。';
         for (const memory of data.items) {
             const row = document.createElement('article'); row.className = 'lm-card';
             row.innerHTML = '<div class="lm-row"><strong class="lm-grow"></strong><label class="lm-inline"><input type="checkbox">使用</label></div><p class="lm-text"></p><details><summary>编辑与来源</summary><textarea rows="5" aria-label="编辑记忆正文"></textarea><div class="lm-row"><button type="button" data-save>保存修改</button><button type="button" data-retry>重新生成</button></div><div class="lm-log"></div></details>';
@@ -121,7 +122,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             row.querySelector('.lm-log').textContent = memory.sources.map(m => `${m.name}：${m.text}`).join('\n\n'); container.append(row);
         }
     }
-    async function open() { panel.showModal(); if (!dirty) await action(async () => { fill((await runtime.connect()).config); status('服务器已连接'); }); }
+    async function open() { panel.showModal(); if (!dirty) await action(async () => { fill((await runtime.connect()).config); status(notice || '服务器已连接'); }); }
     function close() { if ((dirty || drafts.size) && !host.confirm('还有未保存的修改，确定关闭面板？')) return; panel.close(); }
     launcher.onclick = open;
     panel.addEventListener('cancel', event => { event.preventDefault(); close(); });
@@ -158,7 +159,6 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         },
         sync: async () => { await runtime.sync(); await refreshMemories(); }, pause: async () => renderState(await runtime.request('pause', { paused: !paused })),
         retry: async () => { const target = runtime.target; await runtime.sync({ target }); renderState(await runtime.request('retry', {}, target)); },
-        approve: async () => { if (host.confirm('确认最后一条回复已经完整，可以用于记忆？')) renderState(await runtime.approveLatest()); },
         reindex: async () => { if (host.confirm('重建当前聊天的全部向量？会重新调用向量模型，原总结保留。')) renderState(await runtime.request('reindex')); },
         rebuild: async () => { if (host.confirm('删除当前聊天已有记忆并按当前提示词重新整理？手动修改也会被替换，并重新调用模型。建议先导出备份。')) { await runtime.request('rebuild'); drafts.clear(); await refreshMemories(); } },
         clear: async () => { if (host.confirm('清空当前聊天的记忆并停止后台任务？聊天原文保留。')) { await runtime.request('clear'); drafts.clear(); await refreshMemories(); } },
@@ -170,7 +170,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     select('[data-import]').onchange = event => action(async () => { const file = event.target.files[0]; if (!file) return; if (file.size > 20 * 1024 * 1024) throw new Error('备份文件超过 20 MiB'); const backup = JSON.parse(await file.text()); if (host.confirm('恢复备份中与当前聊天来源匹配的记忆？')) { await runtime.request('import', { backup }); await refreshMemories(); } event.target.value = ''; });
     select('[data-filter]').onsubmit = event => { event.preventDefault(); filter = { query: event.target.elements.query.value, kind: event.target.elements.kind.value }; offset = 0; action(refreshMemories); };
     select('[data-search]').onsubmit = event => { event.preventDefault(); action(async () => { const target = runtime.target; await runtime.sync({ target }); const data = await runtime.request('search', { query: event.target.elements.query.value }, target); select('[data-results]').textContent = data.matches.map(m => `第 ${m.floor} 楼 · ${m.name}\n${m.text}`).join('\n\n') || '没有命中'; }); };
-    getContext().eventSource.on(getContext().eventTypes.CHAT_CHANGED, () => { offset = 0; drafts.clear(); select('[data-enabled]').checked = !!runtime.enabled; select('[data-memories]').replaceChildren(); select('[data-preview]').replaceChildren(); select('[data-used]').textContent = '尚未生成'; select('[data-results]').textContent = ''; if (panel.open && getContext().chatId) action(refreshMemories); });
+    getContext().eventSource.on(getContext().eventTypes.CHAT_CHANGED, () => { offset = 0; notice = ''; drafts.clear(); select('[data-enabled]').checked = !!runtime.enabled; select('[data-memories]').replaceChildren(); select('[data-preview]').replaceChildren(); select('[data-used]').textContent = '尚未生成'; select('[data-results]').textContent = ''; if (panel.open && getContext().chatId) action(refreshMemories); });
     const poll = host.setInterval(() => { if (panel.open && !busy && runtime.session) action(async () => { if (!select('[data-view="memories"]').hidden && !select('[data-memories]').contains(document.activeElement)) await refreshMemories(); else renderState(await runtime.request('state')); }); }, 4000);
     const dispose = () => { host.clearInterval(poll); panel.remove(); launcher.remove(); };
     host.addEventListener('beforeunload', () => host.clearInterval(poll));
@@ -179,4 +179,9 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     return { panel, runtime, open, dispose };
 }
 
-if (typeof SillyTavern !== 'undefined') mountMemoryPanel(() => SillyTavern.getContext());
+if (typeof SillyTavern !== 'undefined') {
+    // Summaries are written from what the main model is shown: the message with the prompt-only regexes of SillyTavern applied.
+    const regex = await import('../../../regex/engine.js').catch(() => null);
+    mountMemoryPanel(() => SillyTavern.getContext(), window, regex && (message => regex.getRegexedString(message.mes || '',
+        message.is_user ? regex.regex_placement.USER_INPUT : regex.regex_placement.AI_OUTPUT, { isPrompt: true, depth: 0 })));
+}

@@ -87,6 +87,12 @@ test('authenticated HTTP routes isolate users, reject stale mutations and import
     group.id = wrongGroup.memories.find(m => m.kind === 'summary').id;
     assert.equal((await call('import', { ...longRef, backup: wrongGroup })).status, 400);
     assert.equal((await call('state', { scope: longScope })).data.total, longCount);
+    // A backup made before the chat went on still restores: every memory is checked against its own source.
+    const grown = (await call('sync', { scope: longScope, revision: longSynced.revision, messages: [...longMessages,
+        { id: 'long-u31', role: 'user', name: 'user', text: 'question 31' }, { id: 'long-a31', role: 'assistant', name: 'character', text: 'answer 31', held: true }] })).data;
+    const grownRef = { scope: longScope, revision: grown.revision };
+    await call('clear', grownRef);
+    assert.equal((await call('import', { ...grownRef, backup: longBackup })).data.restored, longCount);
 
     const engine = getEngine(path.join(root, 'a'));
     engine.providers.request = async () => ({ choices: [{ message: { content: '', reasoning_content: 'no usable body' } }] });

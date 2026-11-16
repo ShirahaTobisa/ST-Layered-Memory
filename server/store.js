@@ -1,10 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { Database } from './database.js';
-import { DEFAULTS, turnsFrom, sourceData, eligibleGroups, roleText, cleanMemory, cleanText, stripVector } from '../shared/model.js';
+import { DEFAULTS, turnsFrom, sourceData, eligibleGroups, roleText, cleanMemory, cleanText, stripVector, storedMessage } from '../shared/model.js';
 import { configure, hash, summarySignature, vectorSignature } from './providers.js';
 
 const parse = row => row ? JSON.parse(row.data) : null;
+export const groupHash = children => hash(children.map(m => [m.id, m.summary, m.enabled]));
+// Summaries are written from what the main model was shown, when the page reported it.
+export const shownText = messages => roleText(messages.map(m => m.view ? { ...m, text: m.view } : m));
+export const vectorText = memory => `用户原输入：\n${memory.userText}\n\n本轮总结：\n${memory.summary}`;
 export function scopeId(scope) {
     for (const key of ['actor', 'chat', 'lineage']) if (typeof scope?.[key] !== 'string' || !scope[key] || scope[key].length > 512) throw new Error('聊天身份无效');
     return hash([scope.actor, scope.chat, scope.lineage]);
@@ -32,7 +37,9 @@ export class Store {
             CREATE TABLE IF NOT EXISTS memories (chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(chat_id,id));
             CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE, kind TEXT NOT NULL, status TEXT NOT NULL, input TEXT NOT NULL, lease TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 0);
             CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
+            CREATE INDEX IF NOT EXISTS jobs_chat ON jobs(chat_id);
         `);
+        this.cache = new Map();
         const savedConfig = parse(this.db.prepare('SELECT data FROM config WHERE id=1').get()) || {};
         this.config = configure(savedConfig, DEFAULTS);
         if (savedConfig.version !== 2) this.migrateLegacy(filename);
@@ -65,11 +72,11 @@ export class Store {
                 }
                 for (const memory of chat.memories.filter(memory => memory.kind === 'group')) {
                     const oldChildren = memory.children.map(id => originals.get(id)), children = memory.children.map(id => migrated.get(id));
-                    if (children.some(child => !child) || oldChildren.some(child => !child) || hash(oldChildren.map(child => [child.id, child.summary, child.enabled])) !== memory.sourceHash) continue;
+                    if (children.some(child => !child) || oldChildren.some(child => !child) || groupHash(oldChildren) !== memory.sourceHash) continue;
                     const ids = children.flatMap(child => child.ids);
                     this.remove(chat.id, memory.id);
                     this.put(chat.id, { ...memory, id: hash(ids), ids, children: children.map(child => child.id),
-                        sourceHash: hash(children.map(child => [child.id, child.summary, child.enabled])), recipe: 'legacy-v1',
+                        sourceHash: groupHash(children), recipe: 'legacy-v1',
                         sourceUserIds: children.flatMap(child => child.sourceUserIds), sourceAssistantIds: children.flatMap(child => child.sourceAssistantIds) });
                 }
             }
@@ -79,6 +86,19 @@ export class Store {
     chat(id) {
         const row = this.db.prepare('SELECT * FROM chats WHERE id=?').get(id);
         return row ? { ...row, scope: JSON.parse(row.scope), messages: JSON.parse(row.snapshot) } : null;
+    }
+    revision(id) { return this.db.prepare('SELECT revision FROM chats WHERE id=?').get(id)?.revision; }
+    // Parsed turns of the chats in use, so a long chat is not read again for every finished task.
+    turns(id, messages) {
+        const revision = this.revision(id);
+        let cached = this.cache.get(id);
+        if (cached?.revision !== revision) {
+            messages ||= revision ? this.chat(id).messages : [];
+            cached = { revision, messages, turns: sourceTurns(messages) };
+            this.cache.delete(id); this.cache.set(id, cached);
+            if (this.cache.size > 4) this.cache.delete(this.cache.keys().next().value);
+        }
+        return cached.turns;
     }
     memories(id) { return this.db.prepare('SELECT data FROM memories WHERE chat_id=?').all(id).map(parse); }
     put(id, memory) {
@@ -101,8 +121,8 @@ export class Store {
         return next;
     }
 
-    inherit(id, parentId, snapshot) {
-        const turns = new Map(sourceTurns(snapshot).filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
+    inherit(id, parentId) {
+        const turns = new Map(this.turns(id).filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
         const memories = this.memories(parentId), copied = new Set();
         for (const memory of memories.filter(m => m.kind === 'summary')) {
             const target = turns.get(memory.id);
@@ -118,27 +138,39 @@ export class Store {
         const id = scopeId(scope);
         const parentId = parentChat && parentChat !== scope.chat ? scopeId({ ...scope, chat: parentChat }) : null;
         if (!Array.isArray(messages) || messages.length > 20000) throw new Error('聊天消息数量无效');
+        const existing = this.revision(id);
+        const conflict = () => Object.assign(new Error('聊天已在其他页面更新，请刷新后重试'), { status: 409 });
+        if (messages.some(m => typeof m === 'string')) {
+            // Unchanged messages arrive as bare ids and are read from the snapshot this page last confirmed.
+            if (!existing || expected !== existing) throw conflict();
+            const cached = this.cache.get(id);
+            const known = new Map((cached?.revision === existing ? cached.messages : this.chat(id).messages).map(m => [m.id, m]));
+            messages = messages.map(m => typeof m === 'string' ? known.get(m) : m);
+        }
         const ids = new Set();
         const snapshot = messages.map(m => {
-            if (typeof m.id !== 'string' || !m.id || m.id.length > 128 || ids.has(m.id) || !['user', 'assistant', 'system'].includes(m.role) || typeof m.text !== 'string' || m.text.length > 200000) throw new Error('聊天消息格式或来源 ID 无效');
+            if (!m || typeof m.id !== 'string' || !m.id || m.id.length > 128 || ids.has(m.id) || !['user', 'assistant', 'system'].includes(m.role) || typeof m.text !== 'string' || m.text.length > 200000) throw new Error('聊天消息格式或来源 ID 无效');
             ids.add(m.id);
-            return { id: m.id, role: m.role, name: String(m.name || '').slice(0, 128), text: m.text, swipe: Number.isInteger(m.swipe) ? m.swipe : 0, blocked: !!m.blocked, protected: !!m.protected, ...(m.hidden && m.role !== 'system' ? { hidden: true } : {}) };
+            return storedMessage(m);
         });
-        const revision = hash(snapshot);
-        const existing = this.chat(id);
-        if (existing && expected !== existing.revision && revision !== existing.revision) throw Object.assign(new Error('聊天已在其他页面更新，请刷新后重试'), { status: 409 });
+        const text = JSON.stringify(snapshot), revision = createHash('sha256').update(text).digest('hex');
+        // A page that has just read the chat file sends no revision and is taken as the truth;
+        // after that it must continue from the revision it was given.
+        if (existing && expected && expected !== existing && revision !== existing) throw conflict();
+        if (existing === revision) return this.state(id);
         this.db.transaction(() => {
-            this.db.prepare('INSERT INTO chats(id,scope,revision,snapshot) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,snapshot=excluded.snapshot').run(id, JSON.stringify(scope), revision, JSON.stringify(snapshot));
-            if (!existing && parentId) this.inherit(id, parentId, snapshot);
+            this.db.prepare('INSERT INTO chats(id,scope,revision,snapshot) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,snapshot=excluded.snapshot').run(id, JSON.stringify(scope), revision, text);
+            this.turns(id, snapshot);
+            if (!existing && parentId) this.inherit(id, parentId);
             this.schedule(id);
         })();
         return this.state(id);
     }
 
     schedule(id) {
-        const chat = this.chat(id);
+        const chat = this.db.prepare('SELECT paused FROM chats WHERE id=?').get(id);
         if (!chat) return;
-        const turns = sourceTurns(chat.messages);
+        const turns = this.turns(id);
         const validTurns = new Map(turns.filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
         const savedMemories = [];
         for (const memory of this.memories(id)) {
@@ -155,54 +187,62 @@ export class Store {
             if (memory.turn !== turn.number) { memory.turn = turn.number; this.put(id, memory); }
             summaries.set(memory.id, memory);
         }
-        const jobs = [];
-        if (this.config.summary.url && this.config.summary.model) for (const [index, turn] of turns.entries()) {
-            if (!validTurns.has(turn.key) || summaries.has(turn.key)) continue;
-            const background = turns.slice(Math.max(0, index - 3), index).filter(t => t.eligible && !t.empty);
-            jobs.push({ kind: 'summary', key: turn.key, sourceHash: turn.sourceHash, config: summarySignature(this.config),
-                memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: roleText(turn.user), enabled: true, recipe: 'lm-1.9.5' },
-                names: { userName: turn.user[0]?.name, characterName: turn.assistant[0]?.name },
-                contextTurns: [...background, turn].map(t => ({ number: t.number, user: roleText(t.user), assistant: roleText(t.assistant) })),
-                prompt: `背景（只供理解）：\n${background.map(t => t.text).join('\n\n')}\n\n目标轮次：\n${turn.text}` });
+        // A task row only says what to do; its text is read from the chat when the work starts.
+        const jobs = [], ready = this.config.summary.url && this.config.summary.model;
+        if (ready) for (const turn of validTurns.values()) {
+            if (!summaries.has(turn.key) && !turn.held) jobs.push({ kind: 'summary', key: turn.key, sourceHash: turn.sourceHash, config: summarySignature(this.config) });
         }
-        const groups = eligibleGroups(turns, summaries).map(group => ({ ...group, key: hash(group.ids), sourceHash: hash(group.children.map(m => [m.id, m.summary, m.enabled])) }));
+        const savedGroups = savedMemories.filter(m => m.kind === 'group');
+        const groups = eligibleGroups(turns, summaries, savedGroups).map(group => ({ ...group, key: hash(group.ids), sourceHash: groupHash(group.children) }));
         const groupsById = new Map(groups.map(group => [group.key, group]));
-        const currentGroups = new Map();
-        for (const memory of savedMemories.filter(m => m.kind === 'group')) {
+        const currentGroups = new Set();
+        for (const memory of savedGroups) {
             const group = groupsById.get(memory.id);
             if (!group || group.sourceHash !== memory.sourceHash) this.remove(id, memory.id);
             else {
-                if (memory.turn !== group.children[0].turn || memory.end !== group.children.at(-1).turn) {
-                    memory.turn = group.children[0].turn; memory.end = group.children.at(-1).turn; this.put(id, memory);
-                }
-                currentGroups.set(memory.id, memory);
+                if (memory.turn !== group.start || memory.end !== group.end) { memory.turn = group.start; memory.end = group.end; this.put(id, memory); }
+                currentGroups.add(memory.id);
             }
         }
-        if (this.config.summary.url && this.config.summary.model) for (const group of groups) {
-            if (currentGroups.has(group.key)) continue;
-            jobs.push({ kind: 'group', key: group.key, sourceHash: group.sourceHash, config: summarySignature(this.config),
-                memory: { id: group.key, kind: 'group', turn: group.start, end: group.end, ids: group.ids, sourceUserIds: [...new Set(group.children.flatMap(m => m.sourceUserIds || []))], sourceAssistantIds: [...new Set(group.children.flatMap(m => m.sourceAssistantIds || []))], children: group.children.map(m => m.id), sourceHash: group.sourceHash, enabled: true, recipe: 'lm-1.9.5' },
-                names: { userName: turns.at(-1)?.user[0]?.name, characterName: turns.at(-1)?.assistant[0]?.name },
-                prompt: group.children.map(m => `【第 ${m.turn} 轮】\n${m.summary}`).join('\n\n') });
+        if (ready) for (const group of groups) {
+            if (!currentGroups.has(group.key)) jobs.push({ kind: 'group', key: group.key, sourceHash: group.sourceHash, config: summarySignature(this.config), children: group.children.map(m => m.id) });
         }
         if (this.config.mode === 'enhanced' && this.config.embedding.url && this.config.embedding.model) for (const memory of summaries.values()) {
             if (!memory.enabled || memory.vectorSignature === vectorSignature(this.config)) continue;
-            jobs.push({ kind: 'embedding', key: memory.id, sourceHash: hash(memory.summary), config: vectorSignature(this.config), prompt: `用户原输入：\n${memory.userText}\n\n本轮总结：\n${memory.summary}` });
+            jobs.push({ kind: 'embedding', key: memory.id, sourceHash: hash(memory.summary), config: vectorSignature(this.config) });
         }
-        const wanted = new Set(jobs.map(j => hash([id, j.kind, j.key, j.sourceHash, j.config])));
+        const wanted = new Map(jobs.map(job => [hash([id, job.kind, job.key, job.sourceHash, job.config]), job]));
         for (const job of this.db.prepare("SELECT id FROM jobs WHERE chat_id=? AND status IN ('queued','running','error')").all(id)) {
             if (!wanted.has(job.id) || chat.paused) this.db.prepare("UPDATE jobs SET status='cancelled',lease=NULL,input='{}' WHERE id=?").run(job.id);
+            else wanted.delete(job.id);
         }
         if (chat.paused) return;
-        for (const input of jobs) {
-            const jobId = hash([id, input.kind, input.key, input.sourceHash, input.config]);
-            this.db.prepare(`INSERT INTO jobs(id,chat_id,kind,status,input) VALUES(?,?,?,'queued',?)
-                ON CONFLICT(id) DO UPDATE SET status=CASE WHEN jobs.status IN ('done','cancelled') THEN 'queued' ELSE jobs.status END,input=excluded.input`).run(jobId, id, input.kind, JSON.stringify(input));
+        for (const [jobId, job] of wanted) {
+            this.db.prepare("INSERT INTO jobs(id,chat_id,kind,status,input) VALUES(?,?,?,'queued',?) ON CONFLICT(id) DO UPDATE SET status='queued',input=excluded.input").run(jobId, id, job.kind, JSON.stringify(job));
         }
     }
 
+    // The full request for one summary or merge task, built from the chat as it is now.
+    input(row) {
+        const job = JSON.parse(row.input), turns = this.turns(row.chat_id);
+        const names = turn => ({ userName: turn?.user[0]?.name, characterName: turn?.assistant[0]?.name });
+        if (job.kind === 'group') {
+            const memories = new Map(this.memories(row.chat_id).map(m => [m.id, m]));
+            const children = (job.children || job.memory.children).map(key => memories.get(key));
+            return { ...job, names: names(turns.at(-1)), prompt: children.map(m => `【第 ${m.turn} 轮】\n${m.summary}`).join('\n\n'),
+                memory: { id: job.key, kind: 'group', turn: children[0].turn, end: children.at(-1).turn, ids: children.flatMap(m => m.ids),
+                    sourceUserIds: [...new Set(children.flatMap(m => m.sourceUserIds || []))], sourceAssistantIds: [...new Set(children.flatMap(m => m.sourceAssistantIds || []))],
+                    children: children.map(m => m.id), sourceHash: job.sourceHash, enabled: true, recipe: 'lm-1.9.5' } };
+        }
+        const index = turns.findIndex(turn => turn.key === job.key), turn = turns[index];
+        const background = turns.slice(Math.max(0, index - 3), index).filter(t => t.eligible && !t.empty);
+        return { ...job, names: names(turn),
+            memory: { id: turn.key, kind: 'summary', turn: turn.number, ids: turn.ids, sourceUserIds: turn.userIds, sourceAssistantIds: turn.assistantIds, sourceHash: turn.sourceHash, userText: shownText(turn.user), enabled: true, recipe: 'lm-1.9.5' },
+            contextTurns: [...background, turn].map(t => ({ number: t.number, user: shownText(t.user), assistant: shownText(t.assistant) })) };
+    }
+
     state(id) {
-        const chat = this.chat(id);
+        const chat = this.db.prepare('SELECT revision,paused FROM chats WHERE id=?').get(id);
         if (!chat) return { revision: null, counts: {}, total: 0, paused: false };
         const counts = Object.fromEntries(this.db.prepare('SELECT status,count(*) AS n FROM jobs WHERE chat_id=? GROUP BY status').all(id).map(r => [r.status, r.n]));
         const memories = this.memories(id), summaries = memories.filter(m => m.kind === 'summary');
@@ -239,6 +279,24 @@ export class Store {
         }
         if (input.enabled !== undefined) memory.enabled = !!input.enabled;
         this.db.transaction(() => { this.put(id, memory); this.schedule(id); })();
+    }
+
+    // A renamed chat keeps its memories under the new name; without a new name the chat was deleted.
+    move(actor, from, to) {
+        this.db.transaction(() => {
+            for (const row of this.db.prepare('SELECT id,scope FROM chats').all()) {
+                const scope = JSON.parse(row.scope);
+                if (scope.actor !== actor || scope.chat !== from) continue;
+                const id = to && scopeId({ ...scope, chat: to });
+                // A page that has already handed the chat over under its new name took the memories along.
+                if (id && !this.db.prepare('SELECT 1 FROM chats WHERE id=?').get(id)) {
+                    this.db.prepare('INSERT INTO chats(id,scope,revision,snapshot,paused) SELECT ?,?,revision,snapshot,paused FROM chats WHERE id=?').run(id, JSON.stringify({ ...scope, chat: to }), row.id);
+                    this.db.prepare('UPDATE memories SET chat_id=? WHERE chat_id=?').run(id, row.id);
+                    this.schedule(id);
+                }
+                this.db.prepare('DELETE FROM chats WHERE id=?').run(row.id);
+            }
+        })();
     }
 
     clear(id) {

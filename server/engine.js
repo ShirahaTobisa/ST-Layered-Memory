@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { hash } from './providers.js';
 import { packEmbedding } from './search.js';
+import { vectorText } from './store.js';
 import { cleanText } from '../shared/model.js';
 
 export class Engine {
@@ -45,10 +46,11 @@ export class Engine {
 
     async run(row, task) {
         if (row.kind === 'embedding') return this.embedBatch(task);
-        const input = JSON.parse(row.input), config = structuredClone(this.store.config);
-        let result;
+        const config = structuredClone(this.store.config);
+        let input, result;
         try {
-            if (input.prompt.length > 200000) throw new Error('本轮文本过长，需手动整理；原文保留');
+            input = this.store.input(row);
+            if (JSON.stringify(input.contextTurns || input.prompt).length > 200000) throw new Error('本轮文本过长，需手动整理；原文保留');
             result = cleanText(await this.providers.summarize(config, input, task.controller.signal));
             if (!result) throw new Error('总结未返回有效正文，保留原文');
         } catch (error) { this.fail(task, error); return; }
@@ -63,9 +65,10 @@ export class Engine {
 
     async embedBatch(task) {
         const inputs = task.rows.map(row => JSON.parse(row.input));
+        const texts = new Map(this.store.memories(task.rows[0].chat_id).map(memory => [memory.id, vectorText(memory)]));
         let packed;
         try {
-            const vectors = await this.providers.embed(structuredClone(this.store.config), inputs.map(input => input.prompt), task.controller.signal);
+            const vectors = await this.providers.embed(structuredClone(this.store.config), inputs.map(input => texts.get(input.key)), task.controller.signal);
             if (vectors.length !== inputs.length) throw new Error('向量数量不匹配');
             packed = vectors.map(packEmbedding);
         } catch (error) { this.fail(task, error); return; }

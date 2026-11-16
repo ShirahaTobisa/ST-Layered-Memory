@@ -1,4 +1,5 @@
 import { vectorSignature } from './providers.js';
+import { vectorText } from './store.js';
 import { cleanText, floorsFrom, turnsFrom, roleText } from '../shared/model.js';
 
 export function cosine(a, b) {
@@ -27,11 +28,17 @@ export async function recall(store, id, query, providers) {
     const disabled = new Set(all.filter(m => m.kind === 'group' && !m.enabled).flatMap(m => m.children));
     const memories = all.filter(m => m.kind === 'summary' && m.enabled && !disabled.has(m.id) && m.vectorSignature === vectorSignature(config) && unpackEmbedding(m).length);
     if (!memories.length || !query.trim()) return { memories: [], warnings: [] };
+    const warnings = [];
     try {
         const [vector] = await providers.embed(config, [query.trim()], undefined, 10000);
-        const found = memories.map(m => ({ ...m, score: cosine(vector, unpackEmbedding(m)), why: ['向量召回'] }))
-            .filter(m => m.score >= 0.48).sort((a, b) => b.score - a.score || a.turn - b.turn).slice(0, 10).sort((a, b) => a.turn - b.turn);
-        return { memories: found, warnings: [] };
+        let found = memories.map(m => ({ ...m, score: cosine(vector, unpackEmbedding(m)), why: ['向量召回'] }))
+            .filter(m => m.score >= 0.48).sort((a, b) => b.score - a.score || a.turn - b.turn);
+        // With more candidates than fit, a rerank model reads the best thirty and picks the ten that suit the input.
+        if (found.length > 10 && config.rerank.url && config.rerank.model) try {
+            const candidates = found.slice(0, 30), scores = await providers.rerank(config, query.trim(), candidates.map(vectorText));
+            found = candidates.map((m, i) => ({ ...m, rerank: scores[i], why: ['向量召回', '重排'] })).sort((a, b) => b.rerank - a.rerank || b.score - a.score);
+        } catch { warnings.push('重排失败，本次按向量相似度取'); }
+        return { memories: found.slice(0, 10).sort((a, b) => a.turn - b.turn), warnings };
     } catch {
         return { memories: [], warnings: ['记忆召回失败，本次仍使用总结上下文'] };
     }

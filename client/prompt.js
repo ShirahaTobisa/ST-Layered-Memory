@@ -6,13 +6,20 @@ const xml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&
 const memoryIds = memory => memory.ids?.length ? memory.ids : [...memory.sourceUserIds || [], ...memory.sourceAssistantIds || []];
 
 export function appendRecall(messages, memories) {
-    const index = messages.findLastIndex(m => m.role === 'user' && plain(m));
-    if (index < 0 || !memories.length) return { messages, used: [] };
+    if (!memories.length) return { messages, used: [] };
     const block = ['<enhanced_memory_recall>', ...enhancedMemoryRecallDescription, ...memories.map(m => [
         `  <memory_fragment turn="${xml(m.turn)}" similarity="${(m.score * 100).toFixed(1)}%">`,
         `    <user_input>${xml(m.userText)}</user_input>`, `    <summary>${xml(m.summary)}</summary>`, '  </memory_fragment>',
     ].join('\n')), '</enhanced_memory_recall>'].join('\n');
-    return { messages: messages.map((m, i) => i === index ? { ...m, content: `${m.content}\n\n${block}` } : m), used: memories };
+    const put = (index, content) => ({ messages: messages.map((m, i) => i === index ? { ...m, content } : m), used: memories });
+    // The input obfuscation extension moves the newest input into a tool result; the recalled memories go with it.
+    const moved = messages.findLastIndex(m => m.role === 'tool' && typeof m.content === 'string' && m.content.includes('"source":"user_input"'));
+    if (moved >= 0) try {
+        const result = JSON.parse(messages[moved].content);
+        if (typeof result.text === 'string') return put(moved, JSON.stringify({ ...result, text: `${result.text}\n\n${block}` }));
+    } catch { /* another tool's result */ }
+    const index = messages.findLastIndex(m => m.role === 'user' && plain(m));
+    return index < 0 ? { messages, used: [] } : put(index, `${messages[index].content}\n\n${block}`);
 }
 
 export async function checkPromptSize(messages, tools, count, limit) {
@@ -95,15 +102,16 @@ export function compressHistory(history, source, plan = {}, keep, preserveRaw = 
     const contextEntries = entries.filter(entry => entry.role !== 'system');
     const contextIndex = new Map(contextEntries.map((entry, index) => [entry, index]));
     const candidateCount = Math.max(0, contextEntries.length - Number(keep || 0));
-    const safe = entry => entry.known && entry.ids.every(id => sourceById.has(id) && !sourceById.get(id).blocked && !sourceById.get(id).protected);
-    const eligible = turn => contextIndex.get(turn.assistant) < candidateCount && safe(turn.assistant);
+    const safe = entry => entry.known && entry.ids.every(id => sourceById.has(id) && !sourceById.get(id).protected);
+    // A reply that the user's own regexes have emptied for the prompt gets its summary wherever it is.
+    const eligible = turn => (contextIndex.get(turn.assistant) < candidateCount || !turn.assistant.content.trim()) && safe(turn.assistant);
     const groups = (plan.groups || []).filter(memory => memory.enabled !== false);
     const covered = new Set((plan.groups || []).flatMap(memory => memory.children || []));
     const summaries = (plan.summaries || []).filter(memory => memory.enabled !== false && !covered.has(memory.id));
     const hasHiddenSource = memory => memoryIds(memory).some(id => sourceById.get(id)?.hidden);
     const hidden = [...groups, ...summaries].filter(memory => hasHiddenSource(memory) && memoryIds(memory).every(id => {
         const message = sourceById.get(id);
-        return message && message.role !== 'system' && !message.blocked;
+        return message && message.role !== 'system';
     }));
     const replacements = new Map(), removed = new Set(), used = [];
 

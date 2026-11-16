@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { createRuntime } from '../client/runtime.js';
 import { KEY, VERSION } from '../shared/model.js';
 
-function harness() {
-    const listeners = new Map(), types = Object.fromEntries(['GROUP_WRAPPER_STARTED', 'GROUP_WRAPPER_FINISHED', 'WORLDINFO_ENTRIES_LOADED', 'CHAT_COMPLETION_SETTINGS_READY', 'GENERATION_STARTED', 'GENERATION_ENDED', 'GENERATION_STOPPED', 'STREAM_TOKEN_RECEIVED', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'CHAT_CHANGED'].map(t => [t, t]));
+function harness(view) {
+    const listeners = new Map(), types = Object.fromEntries(['GROUP_WRAPPER_STARTED', 'GROUP_WRAPPER_FINISHED', 'WORLDINFO_ENTRIES_LOADED', 'CHAT_COMPLETION_SETTINGS_READY', 'GENERATION_STARTED', 'GENERATION_ENDED', 'GENERATION_STOPPED', 'STREAM_TOKEN_RECEIVED', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'CHAT_CHANGED', 'CHAT_RENAMED', 'CHAT_DELETED', 'GROUP_CHAT_DELETED'].map(t => [t, t]));
     const events = { on(type, callback) { listeners.set(type, [...listeners.get(type) || [], callback]); }, async emit(type, ...args) { for (const callback of listeners.get(type) || []) await callback(...args); } };
     const ctx = { chatId: 'chat', characters: [{ avatar: 'alice.png' }], characterId: 0, groupId: null, name1: 'User', name2: 'Alice',
         chat: [{ name: 'User', is_user: true, mes: 'hello' }, { name: 'Alice', is_user: false, mes: 'reply' }], chatMetadata: {}, extensionSettings: { [KEY]: { enabled: false } },
@@ -20,42 +20,37 @@ function harness() {
         if (url.endsWith('/plan')) return Response.json({ summaries: [], groups: [], recall: [], warnings: [] });
         return Response.json({ revision: 'remote-revision', matches: [] });
     } };
-    const runtime = createRuntime(() => ctx, host, (type, value) => notices.push({ type, value }));
+    const runtime = createRuntime(() => ctx, host, (type, value) => notices.push({ type, value }), view);
     return { runtime, ctx, host, events, requests, notices };
 }
 
-test('frontend source IDs and server revision survive reload; stale client never adopts remote revision blindly', async () => {
+test('source IDs survive reload; a freshly read chat is the truth and later handoffs only carry what changed', async () => {
     const h = harness();
     h.ctx.chat[0].extra = { files: [{ url: 'notes.txt' }] };
     await h.runtime.sync();
     const first = h.requests.find(r => r.url.endsWith('/sync')).body;
     assert.equal(first.revision, null); assert.ok(first.scope.lineage);
     assert.equal(first.messages[0].protected, true);
-    const ids = h.ctx.chat.map(m => m.extra[KEY].id);
-    assert.equal(h.ctx.chatMetadata[KEY].revision, 'r1');
+    const ids = h.ctx.chat.map(m => m.extra[KEY].id), handoffs = () => h.requests.filter(r => r.url.endsWith('/sync')).length;
+    assert.deepEqual(h.ctx.chatMetadata[KEY], { lineage: first.scope.lineage, chat: 'chat' });
+    await h.runtime.sync();
+    assert.equal(handoffs(), 1);
+    h.ctx.chat[1].mes = 'reply edited';
     await h.runtime.sync();
     assert.deepEqual(h.ctx.chat.map(m => m.extra[KEY].id), ids);
     assert.equal(h.requests.at(-1).body.revision, 'r1');
+    assert.deepEqual(h.requests.at(-1).body.messages.map(m => typeof m), ['string', 'object']);
+    // A chat file restored from a backup or synced from another device still carries an old revision.
     h.ctx.chatMetadata[KEY].revision = 'old-local';
     await h.events.emit('CHAT_CHANGED'); await h.runtime.sync();
-    assert.equal(h.requests.at(-1).body.revision, 'old-local');
+    assert.equal(h.requests.at(-1).body.revision, null);
+    assert.ok(h.requests.at(-1).body.messages.every(m => typeof m === 'object'));
 });
 
-test('unfinished Gemini/tool-stage messages are excluded, and edited replies remain excluded until confirmed', async () => {
-    for (const anti of [{ complete: false, mode: 'tool' }, { complete: true, mode: 'tools' }, { complete: false, mode: 'plain', state: 'edited' }]) {
-        const h = harness(); h.ctx.chat[1].extra = { gemini_reply: anti };
-        await h.runtime.sync(); assert.equal(h.requests.at(-1).body.messages[1].blocked, true);
-    }
-});
-
-test('quiet generations do not alter main prompt or finish an ongoing nonstream generation', async () => {
+test('quiet generations leave the main prompt alone', async () => {
     const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
     const body = { type: 'quiet', messages: [{ role: 'user', content: 'quiet' }] }, original = structuredClone(body);
     await h.events.emit('CHAT_COMPLETION_SETTINGS_READY', body); assert.deepEqual(body, original); assert.equal(h.requests.length, 0);
-    await h.events.emit('GENERATION_STARTED', 'normal', {}, false);
-    h.ctx.chat.push({ is_user: true, mes: 'next' }, { is_user: false, mes: 'still receiving' });
-    await h.events.emit('GENERATION_ENDED');
-    await h.runtime.sync(); assert.equal(h.requests.at(-1).body.messages.at(-1).blocked, true);
 });
 
 test('disabled extension leaves requests alone; backend errors leave original enabled requests intact', async () => {
@@ -77,32 +72,6 @@ test('chat switch during handoff cannot overwrite new chat metadata or attribute
     };
     await assert.rejects(h.runtime.sync(), /聊天已切换/);
     assert.deepEqual(h.ctx.chatMetadata, {});
-});
-
-test('ST generation-ended can precede message-received; successful final message still hands off', async () => {
-    const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
-    await h.events.emit('GENERATION_STARTED', 'normal', {}, false);
-    h.ctx.chat.push({ is_user: true, mes: 'next' }, { is_user: false, mes: 'finished' });
-    h.ctx.streamingProcessor = { messageId: 3, isFinished: true, abortController: new AbortController() };
-    await h.events.emit('STREAM_TOKEN_RECEIVED');
-    await h.events.emit('GENERATION_ENDED');
-    await h.events.emit('MESSAGE_RECEIVED', 3, 'normal');
-    await h.runtime.sync();
-    assert.equal(h.requests.at(-1).body.messages[3].blocked, false);
-});
-
-test('stream failures stay excluded after lifecycle ends; manual confirmation applies only to current text', async () => {
-    const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
-    await h.events.emit('GENERATION_STARTED', 'normal', {}, false);
-    h.ctx.chat.push({ is_user: true, mes: 'next' }, { is_user: false, mes: 'partial' });
-    const controller = new AbortController(); controller.abort();
-    h.ctx.streamingProcessor = { messageId: 3, isFinished: false, isStopped: true, abortController: controller };
-    await h.events.emit('STREAM_TOKEN_RECEIVED');
-    await h.events.emit('MESSAGE_RECEIVED', 3, 'normal');
-    await h.runtime.sync(); assert.equal(h.requests.at(-1).body.messages[3].blocked, true);
-    await h.runtime.approveLatest(); assert.equal(h.requests.at(-1).body.messages[3].blocked, false);
-    h.ctx.chat[3].mes = 'different';
-    await h.runtime.sync(); assert.equal(h.requests.at(-1).body.messages[3].blocked, true);
 });
 
 test('chat-specific switches persist independently and pause handed-off work', async () => {
@@ -140,6 +109,7 @@ test('ST history hook compresses before prompt budgeting while preserving WI inp
         return fallbackFetch(url, init);
     };
     const history = h.ctx.chat.map((m, index) => ({ ...structuredClone(m), index }));
+    let counted = 0; h.ctx.getTokenCountAsync = async text => { counted++; return text.length; };
     await h.host.layeredMemoryInterceptor(history, 10000, () => {}, 'normal');
     const wiInput = history.map(m => m.mes).reverse();
     const saved = structuredClone(h.ctx.chat);
@@ -155,32 +125,7 @@ test('ST history hook compresses before prompt budgeting while preserving WI inp
     await h.events.emit('CHAT_COMPLETION_SETTINGS_READY', body);
     assert.equal(h.notices.at(-1).value.used.length, 3);
     assert.equal(body.messages[1].content, 'summary 0');
-});
-
-test('nonstream and continue replies wait for generation completion and persist cancellation', async () => {
-    for (const type of ['normal', 'continue']) {
-        const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
-        await h.events.emit('GENERATION_STARTED', type, {}, false);
-        if (type === 'normal') h.ctx.chat.push({ is_user: true, mes: 'next' }, { is_user: false, mes: 'answer' });
-        const index = h.ctx.chat.length - 1;
-        h.ctx.chat[index].swipe_id = 0; h.ctx.chat[index].swipe_info = [{ extra: {} }];
-        await h.events.emit('MESSAGE_RECEIVED', index, type === 'continue' ? 'appendFinal' : type);
-        await h.runtime.sync();
-        assert.equal(h.requests.at(-1).body.messages[index].blocked, true);
-        await h.events.emit('GENERATION_ENDED'); await h.runtime.sync();
-        assert.equal(h.requests.at(-1).body.messages[index].blocked, false);
-    }
-    const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
-    h.ctx.chat[1].swipe_id = 0; h.ctx.chat[1].swipe_info = [{ extra: {} }];
-    await h.runtime.sync();
-    await h.events.emit('GENERATION_STARTED', 'continue', {}, false);
-    h.ctx.chat[1].mes += ' partial';
-    let saved = 0; h.ctx.saveChat = async () => { saved++; };
-    h.ctx.chatMetadata[KEY].enabled = false;
-    await h.events.emit('GENERATION_STOPPED');
-    await h.runtime.sync();
-    assert.ok(saved > 0);
-    assert.equal(h.ctx.chat[1].swipe_info[0].extra[KEY].blocked, h.ctx.chat[1].mes);
+    assert.equal(counted, 0);
 });
 
 test('a queued chat sync and enable action never move to a newly opened chat', async () => {
@@ -199,18 +144,6 @@ test('a queued chat sync and enable action never move to a newly opened chat', a
     };
     await assert.rejects(h.runtime.setEnabled(true), /聊天已切换/);
     assert.equal(h.requests.filter(r => r.url.endsWith('/pause')).length, 0);
-});
-
-test('group replies remain blocked until the whole group batch finishes', async () => {
-    const h = harness(); h.ctx.groupId = 'group'; h.ctx.extensionSettings[KEY].enabled = true;
-    await h.events.emit('GROUP_WRAPPER_STARTED', { type: 'normal' });
-    h.ctx.chat.push({ is_user: true, mes: 'group question' });
-    await h.events.emit('GENERATION_STARTED', 'normal', {}, false);
-    h.ctx.chat.push({ is_user: false, mes: 'first speaker' });
-    await h.events.emit('MESSAGE_RECEIVED', 3, 'normal'); await h.events.emit('GENERATION_ENDED');
-    await h.runtime.sync(); assert.equal(h.requests.at(-1).body.messages[3].blocked, true);
-    await h.events.emit('GROUP_WRAPPER_FINISHED');
-    await h.runtime.sync(); assert.equal(h.requests.at(-1).body.messages[3].blocked, false);
 });
 
 test('automatic handoff checks backend version before writing snapshots', async () => {
@@ -235,7 +168,7 @@ test('recall added after history compression respects the final prompt capacity'
     assert.deepEqual(body, original); assert.match(h.notices.at(-1).value, /超过当前上下文/);
 });
 
-test('history plans are discarded if sources change while retrieval is pending', async () => {
+test('a memory is not used for a message that changed while retrieval was pending', async () => {
     const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
     h.ctx.chat.push({ is_user: true, name: 'User', mes: 'new question' }, { is_user: false, name: 'Alice', mes: 'new answer' });
     const base = h.host.fetch;
@@ -248,12 +181,12 @@ test('history plans are discarded if sources change while retrieval is pending',
     const original = structuredClone(history);
     await h.host.layeredMemoryInterceptor(history, 10000, () => {}, 'normal');
     await h.events.emit('WORLDINFO_ENTRIES_LOADED');
-    assert.deepEqual(history, original);
+    assert.deepEqual(history.map(m => m.mes), original.map(m => m.mes));
 });
 
 test('the fallback can compress the first request before source IDs were saved', async () => {
     const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
-    h.ctx.chat.push({ is_user: true, mes: 'new question' }, { is_user: false, mes: 'new answer' });
+    h.ctx.chat.push({ is_user: true, mes: 'second question' }, { is_user: false, mes: 'second answer' }, { is_user: true, mes: 'new question' }, { is_user: false, mes: 'new answer' });
     const base = h.host.fetch;
     h.host.fetch = async (url, init) => url.endsWith('/plan') ? Response.json({ summaries: [{ id: 's', sourceAssistantIds: [h.ctx.chat[1].extra[KEY].id], summary: 'valid memory' }], groups: [], recall: [] }) : base(url, init);
     const body = { type: 'normal', messages: h.ctx.chat.map(m => ({ role: m.is_user ? 'user' : 'assistant', content: m.mes })) };
@@ -283,6 +216,7 @@ test('disabling waits for in-flight handoff before pausing its latest revision',
         if (url.endsWith('/sync')) { started(); return new Promise(resolve => { release = resolve; }); }
         return base(url, init);
     };
+    h.ctx.chat[1].mes = 'changed';
     const syncing = h.runtime.sync(); await ready;
     const disabling = h.runtime.setEnabled(false);
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -311,7 +245,7 @@ test('hidden dialogue keeps its original role while system notices, comments and
 test('the main history hook uses hidden memories before token budgeting without unhiding messages', async () => {
     const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
     h.ctx.chat[0].is_system = true; h.ctx.chat[1].is_system = true;
-    h.ctx.chat.push({ name: 'User', is_user: true, mes: '继续剧情' });
+    h.ctx.chat.push({ name: 'User', is_user: true, mes: '上上轮' }, { name: 'Alice', is_user: false, mes: '上上轮的回复' }, { name: 'User', is_user: true, mes: '上一轮' }, { name: 'Alice', is_user: false, mes: '上一轮的回复' }, { name: 'User', is_user: true, mes: '继续剧情' });
     const base = h.host.fetch;
     h.host.fetch = async (url, init) => url.endsWith('/plan') ? Response.json({ groups: [], recall: [], warnings: [], summaries: [{
         id: 'hidden-summary', turn: 1, ids: h.ctx.chat.slice(0, 2).map(m => m.extra[KEY].id), summary: '隐藏消息的记忆', enabled: true,
@@ -321,7 +255,7 @@ test('the main history hook uses hidden memories before token budgeting without 
     const wiInput = history.map(m => m.mes);
     await h.events.emit('WORLDINFO_ENTRIES_LOADED');
     assert.ok(history.some(m => m.mes === '隐藏消息的记忆'));
-    assert.deepEqual(wiInput, ['继续剧情']);
+    assert.deepEqual(wiInput, ['上上轮', '上上轮的回复', '上一轮', '上一轮的回复', '继续剧情']);
     assert.equal(history.at(-1).mes, '继续剧情');
     assert.ok(h.ctx.chat.slice(0, 2).every(m => m.is_system));
     assert.ok(!history.some(m => ['hello', 'reply'].includes(m.mes)));
@@ -330,14 +264,130 @@ test('the main history hook uses hidden memories before token budgeting without 
     assert.equal(body.messages.filter(m => m.content === '隐藏消息的记忆').length, 1);
 });
 
-test('hiding a reply during generation does not bypass its completion checks', async () => {
+test('messages deleted one after another are handed over once the chat has settled', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
+    h.ctx.chat.push({ name: 'User', is_user: true, mes: 'second' }, { name: 'Alice', is_user: false, mes: 'second reply' });
+    await h.runtime.sync();
+    const handoffs = () => h.requests.filter(r => r.url.endsWith('/sync'));
+    h.ctx.chat.splice(2, 1); await h.events.emit('MESSAGE_DELETED', 3);
+    h.ctx.chat.splice(2, 1); await h.events.emit('MESSAGE_DELETED', 2);
+    assert.equal(handoffs().length, 1);
+    t.mock.timers.tick(1500);
+    await h.runtime.sync();
+    assert.equal(handoffs().length, 2); assert.equal(handoffs()[1].body.messages.length, 2);
+});
+
+test('renames, deletions and copies tell the server which chat the memories belong to', async () => {
+    const h = harness();
+    await h.events.emit('CHAT_RENAMED', { avatarId: 'alice.png', oldFileName: 'old.jsonl', newFileName: 'new.jsonl' });
+    assert.deepEqual(h.requests.at(-1), { url: '/api/plugins/layered-memory/rename', body: { actor: 'character:alice.png', from: 'old', to: 'new' } });
+    await h.events.emit('CHAT_DELETED', 'gone');
+    assert.deepEqual(h.requests.at(-1), { url: '/api/plugins/layered-memory/forget', body: { actor: 'character:alice.png', chat: 'gone' } });
+    h.ctx.chatMetadata = { main_chat: 'origin', [KEY]: { lineage: 'family', chat: 'copied from' } };
+    await h.runtime.sync();
+    assert.equal(h.requests.at(-1).body.parentChat, 'copied from');
+    assert.equal(h.ctx.chatMetadata[KEY].chat, 'chat');
+});
+
+test('a handoff the server cannot follow is repeated in full', async () => {
+    const h = harness();
+    await h.runtime.sync();
+    h.ctx.chat[1].mes = 'changed';
+    const base = h.host.fetch;
+    let refused = 0;
+    h.host.fetch = async (url, init) => {
+        if (!url.endsWith('/sync') || JSON.parse(init.body).messages.every(m => typeof m === 'object')) return base(url, init);
+        refused++; return Response.json({ error: 'conflict' }, { status: 409 });
+    };
+    await h.runtime.sync();
+    assert.equal(refused, 1); assert.deepEqual(h.requests.at(-1).body.messages.map(m => m.text), ['hello', 'changed']);
+});
+
+test('a script rewriting the new message mid-request neither discards the plan nor compresses the history twice', async () => {
+    const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
+    h.ctx.chat[0].is_system = true; h.ctx.chat[1].is_system = true;
+    h.ctx.chat.push({ name: 'User', is_user: true, mes: 'old question' }, { name: 'Alice', is_user: false, mes: 'old answer' }, { name: 'User', is_user: true, mes: 'newer question' }, { name: 'Alice', is_user: false, mes: 'newer answer' },
+        { name: 'User', is_user: true, mes: 'last question' }, { name: 'Alice', is_user: false, mes: 'last answer' }, { name: 'User', is_user: true, mes: 'what I really typed' });
+    const base = h.host.fetch;
+    h.host.fetch = async (url, init) => url.endsWith('/plan') ? Response.json({ groups: [], recall: [], warnings: [], summaries: [
+        { id: 'hidden', turn: 1, ids: h.ctx.chat.slice(0, 2).map(m => m.extra[KEY].id), summary: 'memory of the hidden turn', enabled: true },
+        { id: 'edited', turn: 2, ids: h.ctx.chat.slice(2, 4).map(m => m.extra[KEY].id), sourceAssistantIds: [h.ctx.chat[3].extra[KEY].id], summary: 'memory of the old answer', enabled: true },
+    ] }) : base(url, init);
+    const history = h.ctx.chat.filter(m => !m.is_system).map((m, index) => ({ ...structuredClone(m), index }));
+    await h.host.layeredMemoryInterceptor(history, 10000, () => {}, 'normal');
+    h.ctx.chat[8].mes = 'a fixed sentence written by a preset script';
+    h.ctx.chat[3].mes = 'old answer, edited meanwhile';
+    await h.events.emit('WORLDINFO_ENTRIES_LOADED');
+    assert.equal(history.filter(m => m.mes === 'memory of the hidden turn').length, 1);
+    assert.ok(history.some(m => m.mes === 'old answer') && !history.some(m => m.mes === 'memory of the old answer'));
+    const handoffs = h.requests.filter(r => r.url.endsWith('/sync')).length;
+    const body = { type: 'normal', messages: history.map(m => ({ role: m.is_user ? 'user' : 'assistant', content: m.mes })) };
+    await h.events.emit('CHAT_COMPLETION_SETTINGS_READY', body);
+    assert.equal(body.messages.filter(m => m.content === 'memory of the hidden turn').length, 1);
+    assert.equal(h.requests.filter(r => r.url.endsWith('/sync')).length, handoffs);
+    assert.match(h.notices.at(-1).value.reason, /已按规则压缩/);
+});
+
+test('each message carries the text it is sent as, worked out once per message text', async () => {
+    let calls = 0;
+    const h = harness(message => { calls++; return message.mes.replace(/<status>.*<\/status>/, ''); });
+    h.ctx.chat[1].mes = 'reply<status>hp 3</status>';
+    await h.runtime.sync();
+    const first = h.requests.at(-1).body.messages;
+    assert.deepEqual([first[1].text, first[1].view, first[0].view], ['reply<status>hp 3</status>', 'reply', undefined]);
+    h.ctx.chat[0].mes = 'hello again';
+    await h.runtime.sync();
+    assert.equal(calls, 3);
+    assert.deepEqual(h.requests.at(-1).body.messages.map(m => typeof m), ['object', 'string']);
+});
+
+test('opening a chat the server already holds uploads nothing', async () => {
+    const h = harness();
+    await h.runtime.sync();
+    const first = h.requests.find(r => r.url.endsWith('/sync')).body.messages, base = h.host.fetch;
+    const { createHash } = await import('node:crypto');
+    const { storedMessage } = await import('../shared/model.js');
+    const held = createHash('sha256').update(JSON.stringify(first.map(storedMessage))).digest('hex');
+    h.host.fetch = async (url, init) => url.endsWith('/state') ? Response.json({ revision: held, counts: {} }) : base(url, init);
+    await h.events.emit('CHAT_CHANGED');
+    const state = await h.runtime.sync();
+    assert.equal(h.requests.filter(r => r.url.endsWith('/sync')).length, 1);
+    assert.equal(state.revision, held);
+    h.ctx.chat[1].mes = 'changed after opening';
+    await h.runtime.sync();
+    assert.equal(h.requests.at(-1).body.revision, held);
+    assert.deepEqual(h.requests.at(-1).body.messages.map(m => typeof m), ['string', 'object']);
+});
+
+test('the two newest turns are held back until later turns are complete', async () => {
+    const h = harness();
+    h.ctx.chat[1].extra = { gemini_reply: { complete: false, mode: 'plain', state: 'cancelled' } };
+    h.ctx.chat.push({ name: 'User', is_user: true, mes: 'second' }, { name: 'Alice', is_user: false, mes: 'second reply' }, { name: 'User', is_user: true, mes: 'third' });
+    await h.runtime.sync();
+    assert.deepEqual(h.requests.at(-1).body.messages.map(m => !!m.held), [false, true, false, true, false]);
+    h.ctx.chat.push({ name: 'Alice', is_user: false, mes: 'third reply' }, { name: 'Bob', is_user: false, mes: 'another speaker' });
+    await h.runtime.sync();
+    const sent = h.requests.at(-1).body.messages;
+    assert.equal(sent[1].held, undefined); assert.equal(typeof sent[3], 'string');
+    assert.deepEqual(sent.slice(5).map(m => m.held), [true, true]);
+});
+
+test('a reply costs no chat save of its own and is handed over once generation has ended', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
+    h.ctx.chat.push({ name: 'User', is_user: true, mes: 'second' }, { name: 'Alice', is_user: false, mes: 'second reply' });
+    await h.runtime.sync();
+    let saves = 0; h.ctx.saveChat = h.ctx.saveMetadata = async () => { saves++; };
+    const before = h.requests.length;
     h.ctx.chat.push({ name: 'User', is_user: true, mes: 'next' });
-    await h.events.emit('GENERATION_STARTED', 'normal', {}, false);
-    h.ctx.chat.push({ name: 'Alice', is_user: false, is_system: true, mes: 'hidden answer' });
-    await h.events.emit('MESSAGE_RECEIVED', 3, 'normal'); await h.runtime.sync();
-    assert.equal(h.requests.at(-1).body.messages[3].blocked, true);
-    await h.events.emit('GENERATION_ENDED'); await h.runtime.sync();
-    const message = h.requests.at(-1).body.messages[3];
-    assert.equal(message.role, 'assistant'); assert.equal(message.hidden, true); assert.equal(message.blocked, false);
+    await h.host.layeredMemoryInterceptor(h.ctx.chat.map((m, index) => ({ ...structuredClone(m), index })), 10000, () => {}, 'normal');
+    h.ctx.chat.push({ name: 'Alice', is_user: false, mes: 'finished answer' });
+    await h.events.emit('GENERATION_ENDED');
+    t.mock.timers.tick(1500);
+    await h.runtime.sync();
+    const handoffs = h.requests.slice(before).filter(r => r.url.endsWith('/sync')).map(r => r.body.messages);
+    assert.equal(saves, 0);
+    assert.deepEqual(handoffs.map(messages => messages.map(m => typeof m)), [['string', 'string', 'string', 'string', 'object'], ['string', 'object', 'string', 'string', 'string', 'object']]);
+    assert.deepEqual([handoffs[1][1].held, handoffs[1][5].held], [undefined, true]);
 });

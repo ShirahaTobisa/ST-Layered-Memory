@@ -1,11 +1,13 @@
 export const KEY = 'layered_memory';
-export const VERSION = '0.2.2';
+export const VERSION = '0.2.3';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
     version: 2, mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5,
     summary: { url: '', model: '', key: '' },
     embedding: { url: '', model: '', key: '' },
+    rerank: { url: '', model: '', key: '' },
 };
+export const PROVIDERS = ['summary', 'embedding', 'rerank'];
 
 // SillyTavern also uses is_system for hidden ordinary dialogue.
 export function memoryRole(message) {
@@ -36,6 +38,13 @@ export function cleanText(text) {
     if (!stack.length) output.push(value.slice(cursor));
     return output.join('').trim();
 }
+
+// The stored form of a message. Both sides build it the same way, so a page can tell
+// from a hash alone that the server already holds its chat.
+export const storedMessage = m => ({ id: m.id, role: m.role, name: String(m.name || '').slice(0, 128), text: m.text,
+    swipe: Number.isInteger(m.swipe) ? m.swipe : 0, blocked: !!m.blocked, protected: !!m.protected,
+    ...(m.hidden && m.role !== 'system' ? { hidden: true } : {}), ...(m.held && m.role === 'assistant' ? { held: true } : {}),
+    ...(typeof m.view === 'string' && m.view !== m.text && m.view.length <= 200000 && m.role !== 'system' ? { view: m.view } : {}) });
 
 export const stripVector = ({ vector, vectorSignature, embeddingQ, embeddingDims, embeddingScale, embeddingEncoding, ...memory }) => memory;
 
@@ -84,9 +93,8 @@ export function turnsFrom(messages) {
         return {
             ...turn, number: index + 1, ids: all.map(m => m.id),
             userIds: turn.user.map(m => m.id), assistantIds: turn.assistant.map(m => m.id),
-            eligible: turn.assistant.every(m => !m.blocked),
+            eligible: turn.assistant.every(m => !m.blocked), held: turn.assistant.some(m => m.held),
             empty: turn.assistant.every(m => !cleanText(m.text)),
-            text: roleText(all),
         };
     });
 }
@@ -96,18 +104,36 @@ export function sourceData(turn) {
     return [...turn.user, ...turn.assistant].map(m => [m.id, m.role, m.name, m.text, m.swipe, !!m.blocked, !!m.protected]);
 }
 
-export function eligibleGroups(turns, memories) {
-    const groups = [];
-    const limit = Math.max(0, turns.length - 25);
-    for (let start = 0; start + 5 <= limit; start += 5) {
-        const subset = turns.slice(start, start + 5);
-        const children = subset.flatMap(turn => {
-            if (!turn.eligible || turn.empty) return [];
-            return [memories.get(turn.key)].filter(memory => memory && memory.enabled !== false);
-        });
-        const complete = subset.every(turn => turn.empty || memories.has(turn.key));
-        if (!complete || children.length < 2) continue;
-        groups.push({ start: children[0].turn, end: children.at(-1).turn, children, ids: children.flatMap(m => m.ids || []) });
+// A merged memory stays with the summaries it was made from, so deleting or adding a
+// turn only touches its own group. Turns outside the latest 25 that no group covers
+// yet are taken five at a time.
+export function eligibleGroups(turns, memories, existing = []) {
+    const position = new Map(turns.map((turn, index) => [turn.key, index]));
+    const group = children => ({ start: children[0].turn, end: children.at(-1).turn, children, ids: children.flatMap(m => m.ids || []) });
+    const kept = new Map(), covered = new Set();
+    for (const saved of existing) {
+        const children = (saved.children || []).map(key => memories.get(key));
+        const valid = children.length > 1 && children.every((m, i) => m && m.enabled !== false && !covered.has(m.id)
+            && position.has(m.id) && (!i || position.get(children[i - 1].id) < position.get(m.id)));
+        if (!valid) continue;
+        kept.set(position.get(children[0].id), children);
+        for (const child of children) covered.add(child.id);
+    }
+    const groups = [], limit = Math.max(0, turns.length - 25);
+    let open = [], keptEnd = -1;
+    const close = () => {
+        const children = open.flatMap(turn => !turn.eligible || turn.empty ? [] : [memories.get(turn.key)].filter(m => m && m.enabled !== false));
+        if (children.length > 1 && open.every(turn => turn.empty || memories.has(turn.key))) groups.push(group(children));
+        open = [];
+    };
+    for (const [index, turn] of turns.entries()) {
+        if (kept.has(index)) {
+            close();
+            groups.push(group(kept.get(index)));
+            keptEnd = Math.max(keptEnd, position.get(kept.get(index).at(-1).id));
+        }
+        if (index <= keptEnd || index >= limit) continue;
+        if (open.push(turn) === 5) close();
     }
     return groups;
 }

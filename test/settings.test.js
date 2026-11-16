@@ -29,7 +29,7 @@ function harness() {
             return Response.json({ revision: 'r1', counts: {}, items: [], filteredTotal: 0 });
         }
     };
-    return { dom, context, host };
+    return { dom, context, host, listeners };
 }
 
 test('settings panel exposes Anima-style model, rules, memory and context controls', async () => {
@@ -39,6 +39,7 @@ test('settings panel exposes Anima-style model, rules, memory and context contro
     assert.equal(panel.panel.querySelectorAll('[data-tab]').length, 4);
     assert.ok(panel.panel.querySelector('[name="summary.url"]'));
     assert.ok(panel.panel.querySelector('[name="embedding.model"]'));
+    assert.ok(panel.panel.querySelector('[name="rerank.url"]') && panel.panel.querySelector('[data-check="rerank"]'));
     assert.ok(panel.panel.querySelector('[name="keep"][type="range"]'));
     assert.ok(panel.panel.querySelector('[name="concurrency"][type="range"]'));
     assert.ok(panel.panel.querySelector('[data-action="export"]'));
@@ -89,4 +90,18 @@ test('a failed memory switch does not display an unsaved enabled state', async (
     assert.equal(toggle.checked, true);
     assert.match(panel.panel.querySelector('[data-status]').textContent, /edit failed/);
     panel.dispose(); h.dom.window.close();
+});
+
+test('opening the panel keeps the notice left by the last request', async () => {
+    const h = harness(), panel = mountMemoryPanel(() => h.context, h.host);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    h.context.extensionSettings[KEY].enabled = true;
+    const base = h.host.fetch;
+    h.host.fetch = async (url, init) => url.endsWith('/sync') ? Response.json({ error: 'handoff refused' }, { status: 400 }) : base(url, init);
+    for (const listener of h.listeners.get('CHAT_COMPLETION_SETTINGS_READY')) await listener({ type: 'normal', messages: [{ role: 'user', content: 'hi' }] });
+    panel.panel.showModal = () => {};
+    await panel.open();
+    assert.match(panel.panel.querySelector('[data-status]').textContent, /本轮保留原请求：handoff refused/);
+    panel.dispose();
+    h.dom.window.close();
 });

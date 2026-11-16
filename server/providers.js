@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DEFAULTS, assertNumber, cleanText } from '../shared/model.js';
+import { DEFAULTS, PROVIDERS, assertNumber, cleanText } from '../shared/model.js';
 import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt } from '../shared/summary-prompts.js';
 
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -8,7 +8,7 @@ export const vectorSignature = config => hash(['lm-1.9.5', config.embedding.url,
 
 export function configure(input, previous = DEFAULTS) {
     const next = structuredClone(DEFAULTS);
-    for (const name of ['summary', 'embedding']) {
+    for (const name of PROVIDERS) {
         for (const key of ['url', 'model', 'key']) next[name][key] = previous[name]?.[key] || '';
         const section = input[name];
         if (!section) continue;
@@ -34,7 +34,7 @@ export function configure(input, previous = DEFAULTS) {
 
 export function publicConfig(config) {
     const value = structuredClone(config);
-    for (const name of ['summary', 'embedding']) {
+    for (const name of PROVIDERS) {
         value[name].hasKey = !!value[name].key;
         delete value[name].key;
     }
@@ -89,6 +89,15 @@ export class Providers {
         const dim = ordered[0]?.embedding?.length;
         if (!dim || dim > 8192 || ordered.some((item, i) => item.index !== i || !Array.isArray(item.embedding) || item.embedding.length !== dim || item.embedding.some(n => typeof n !== 'number' || !Number.isFinite(n)))) throw new Error('向量索引、维度或数值无效');
         return ordered.map(item => item.embedding);
+    }
+
+    // Jina/Cohere-style rerank: how well each document fits the query, in the order the documents were given.
+    async rerank(config, query, documents, signal, timeout = 10000) {
+        const setting = config.rerank, scores = documents.map(() => -Infinity);
+        const data = await this.request(setting, 'rerank', { model: setting.model, query, documents, top_n: documents.length }, signal, timeout);
+        for (const item of Array.isArray(data.results) ? data.results : []) if (Number.isInteger(item?.index) && item.index in scores && Number.isFinite(item.relevance_score)) scores[item.index] = item.relevance_score;
+        if (!scores.some(Number.isFinite)) throw new Error('重排接口没有返回有效分数');
+        return scores;
     }
 
     async models(setting) {
