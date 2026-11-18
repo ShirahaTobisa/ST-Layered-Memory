@@ -24,7 +24,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
 <div class="lm-row"><button type="button" data-models="${key}">获取模型列表</button><button type="button" data-check="${key}">测试模型</button></div><small data-provider-status="${key}">测试模型会向所填接口发送一条小请求。</small></fieldset>`).join('')}
 </div><p class="lm-muted">API 地址填根地址。OpenAI 兼容接口通常以 /v1 结尾；Gemini 可使用 /v1beta/openai 兼容地址。密钥留空会保留已保存的值。</p></section>
 <section data-view="rules" hidden><h3>记忆方式</h3><div class="lm-grid"><label class="lm-card lm-inline"><input name="mode" type="radio" value="classic"><span><strong>基础模式</strong><br><small>逐轮总结与旧记忆合并，保留最近原文。</small></span></label><label class="lm-card lm-inline"><input name="mode" type="radio" value="enhanced"><span><strong>增强模式</strong><br><small>在相同总结上增加向量召回，补回有关细节。</small></span></label></div>
-<div class="lm-card"><label><span>保留最近 <output data-value="keep">20</output> 楼原文</span><input name="keep" type="range" min="10" max="40" step="2" value="20"></label><p class="lm-muted">连续同角色发言合并算一楼。普通一问一答是两楼；这部分始终保留原文。</p><label><span>总结并发 <output data-value="concurrency">5</output></span><input name="concurrency" type="range" min="1" max="10" step="1" value="5"></label><p class="lm-muted">同时进行的总结请求数量，默认 5。接口限流时可调低。</p></div>
+<div class="lm-card"><label><span>保留最近 <output data-value="keep">20</output> 楼原文</span><input name="keep" type="range" min="10" max="40" step="2" value="20"></label><p class="lm-muted">连续同角色发言合并算一楼。普通一问一答是两楼；这部分始终保留原文。</p><label class="lm-inline"><input name="autoHide" type="checkbox">已总结的旧楼自动隐藏</label><p class="lm-muted">保留楼数以外、已经整理成记忆的楼层自动隐藏，聊天里看到的就是发给模型的样子。只会取消插件自己隐藏的楼层；手动或其他脚本隐藏的不动，插件隐藏后你手动取消的也不会再被隐藏。</p><label><span>总结并发 <output data-value="concurrency">5</output></span><input name="concurrency" type="range" min="1" max="10" step="1" value="5"></label><p class="lm-muted">同时进行的总结请求数量，默认 5。接口限流时可调低。</p></div>
 <div class="lm-grid"><div class="lm-card"><strong>近期</strong><small>最近原文保持完整</small></div><div class="lm-card"><strong>较早</strong><small>用户原输入＋逐轮总结</small></div><div class="lm-card"><strong>更早</strong><small>最近 25 轮之外，每 5 轮合并</small></div></div>
 <p class="lm-muted">增强模式：用最新用户输入找回相关经历，最多 10 条，按时间排列。总结和召回内容共同参与对话，酒馆按模型上下文容量组装请求。</p>
 <div class="lm-card"><label class="lm-inline"><input data-raw-search type="checkbox">允许模型检索聊天原文</label><p class="lm-muted">用于找回总结省略的原话，需要主模型支持工具调用。默认关闭。</p><label>每次原文检索结果数<input name="rawLimit" type="number" min="5" max="10" value="5"></label></div><div class="lm-row">${command('defaults', '恢复默认规则')}</div></section></form>
@@ -70,6 +70,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             if (key === 'key') { input.value = ''; input.placeholder = config[group]?.hasKey ? '已保存；留空保留' : '未保存'; }
             else if (key === 'clearKey') input.checked = false;
             else if (input.type === 'radio') input.checked = input.value === value;
+            else if (input.type === 'checkbox') input.checked = !!value;
             else input.value = value ?? '';
         }
         select('[data-raw-search]').checked = !!settings().rawSearch;
@@ -83,7 +84,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             const [group, key] = input.name.split('.');
             const clear = key === 'key' && select(`[name="${group}.clearKey"]`).checked;
             if (key === 'key' && !input.value && !clear) continue;
-            const val = clear ? '' : ['range', 'number'].includes(input.type) ? Number(input.value) : input.value;
+            const val = clear ? '' : input.type === 'checkbox' ? input.checked : ['range', 'number'].includes(input.type) ? Number(input.value) : input.value;
             if (key) { value[group] ??= {}; value[group][key] = val; } else value[group] = val;
         }
         return value;
@@ -154,6 +155,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         defaults: () => {
             for (const key of ['keep', 'concurrency', 'rawLimit']) { select(`[name="${key}"]`).value = DEFAULTS[key]; const output = select(`[data-value="${key}"]`); if (output) output.textContent = DEFAULTS[key]; }
             for (const input of panel.querySelectorAll('[name="mode"]')) input.checked = input.value === DEFAULTS.mode;
+            select('[name="autoHide"]').checked = DEFAULTS.autoHide;
             select('[data-raw-search]').checked = false;
             dirty = true; status('已恢复默认规则，点击保存生效');
         },

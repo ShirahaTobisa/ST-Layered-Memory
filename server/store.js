@@ -246,7 +246,11 @@ export class Store {
         if (!chat) return { revision: null, counts: {}, total: 0, paused: false };
         const counts = Object.fromEntries(this.db.prepare('SELECT status,count(*) AS n FROM jobs WHERE chat_id=? GROUP BY status').all(id).map(r => [r.status, r.n]));
         const memories = this.memories(id), summaries = memories.filter(m => m.kind === 'summary');
-        return { revision: chat.revision, counts, total: memories.length, paused: !!chat.paused,
+        // Turns a memory in use stands for in the prompt: enabled merged memories, and enabled summaries no merge took in.
+        const groups = memories.filter(m => m.kind === 'group'), merged = new Set(groups.flatMap(m => m.children || []));
+        const covered = [...groups.filter(m => m.enabled !== false).map(m => [m.turn, m.end]),
+            ...summaries.filter(m => m.enabled !== false && !merged.has(m.id)).map(m => [m.turn, m.turn])];
+        return { revision: chat.revision, counts, total: memories.length, paused: !!chat.paused, covered,
             summaries: summaries.length, groups: memories.length - summaries.length,
             indexed: summaries.filter(m => m.embeddingQ && m.vectorSignature === vectorSignature(this.config)).length,
             legacy: summaries.filter(m => m.recipe !== 'lm-1.9.5' && !m.edited).length,

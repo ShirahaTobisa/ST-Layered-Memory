@@ -26,6 +26,8 @@ export function configure(input, previous = DEFAULTS) {
     if (!['classic', 'enhanced'].includes(next.mode)) throw new Error('未知记忆模式');
     const keep = Number(input.keep ?? previous.keep);
     next.keep = Number.isFinite(keep) ? Math.max(10, Math.min(40, Math.round(keep / 2) * 2)) : 20;
+    next.autoHide = input.autoHide ?? previous.autoHide ?? DEFAULTS.autoHide;
+    if (typeof next.autoHide !== 'boolean') throw new Error('自动隐藏设置格式错误');
     const concurrency = Number(input.concurrency ?? (previous.version === 2 ? previous.concurrency : 5));
     next.concurrency = Number.isFinite(concurrency) ? Math.max(1, Math.min(10, Math.round(concurrency))) : 5;
     next.rawLimit = Math.round(assertNumber(input.rawLimit ?? previous.rawLimit ?? 5, 5, 10, '原文结果数量'));

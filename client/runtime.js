@@ -1,4 +1,4 @@
-import { KEY, MAIN_TYPES, VERSION, memoryRole, storedMessage } from '../shared/model.js';
+import { KEY, MAIN_TYPES, VERSION, hideTargets, memoryRole, storedMessage } from '../shared/model.js';
 import { appendRecall, buildPrompt, compressHistory, checkPromptSize } from './prompt.js';
 
 const FIELDS = ['name', 'role', 'text', 'view', 'swipe', 'hidden', 'held', 'protected'];
@@ -110,6 +110,35 @@ export function createRuntime(getContext, host, notify, view) {
         return result;
     }
 
+    // Old floors a memory in use already stands for are hidden, so the chat shows what the model is sent. Only floors
+    // this plugin marked as hidden are ever shown again, and one someone shows again by hand stays visible from then on.
+    // This may run while a reply is being made: SillyTavern picks the messages for a request when it starts, the newest
+    // floors are never touched, all floors change in one go and the chat is saved like after any edit.
+    function tidy(data) {
+        const run = async () => {
+            const context = getContext(), current = session;
+            if (data && !same(current)) return;
+            const want = data && enabled() && config?.autoHide ? hideTargets(current.messages, data.covered || [], config.keep) : new Set();
+            let changed = false;
+            context.chat.forEach((message, index) => {
+                const metadata = message.extra?.[KEY];
+                if (!metadata?.id || memoryRole(message) === 'system') return;
+                let hidden = !!message.is_system;
+                if (metadata.autoHidden) {
+                    if (!hidden) { delete metadata.autoHidden; metadata.keepVisible = true; changed = true; return; }
+                    if (!want.has(metadata.id)) { hidden = false; delete metadata.autoHidden; }
+                } else if (!hidden && !metadata.keepVisible && want.has(metadata.id)) { hidden = true; metadata.autoHidden = true; }
+                if (hidden === !!message.is_system) return;
+                message.is_system = hidden; changed = true;
+                host.document?.querySelector(`.mes[mesid="${index}"]`)?.setAttribute('is_system', String(hidden));
+            });
+            if (changed) await context.saveChat();
+        };
+        const result = chain.then(run);
+        chain = result.catch(() => {});
+        return result;
+    }
+
     async function request(path, body = {}, origin = capture()) {
         requireSame(origin);
         if (!config) await connect();
@@ -119,6 +148,8 @@ export function createRuntime(getContext, host, notify, view) {
         const target = session;
         const result = await api(path, { ...body, scope: target.scope, revision: target.revision });
         if (!same(target)) throw new Error('聊天已切换');
+        // These change which turns a memory stands for, so the hidden floors are checked again.
+        if (['edit', 'retry', 'rebuild', 'clear', 'import'].includes(path)) safeSync();
         return result;
     }
 
@@ -128,14 +159,16 @@ export function createRuntime(getContext, host, notify, view) {
         if (data.version !== VERSION) throw new Error(`前后端版本不一致，请一起更新到 ${VERSION} 并重启酒馆`);
         config = data.config; return data;
     }
-    async function saveConfig(value) { if (!config) await connect(); const data = await api('config', value); config = data.config; return data; }
+    async function saveConfig(value) { if (!config) await connect(); const data = await api('config', value); config = data.config; safeSync(); return data; }
 
     const ctx = getContext();
     ctx.extensionSettings[KEY] ??= ctx.extensionSettings.rph_memory ?? { enabled: false, rawSearch: false }; // 旧版键迁移
     const events = ctx.eventSource, types = ctx.eventTypes;
     const safeSync = () => {
         const target = capture();
-        if (enabled()) sync({ target }).then(data => { if (data && same(target)) notify('state', data); }).catch(error => { if (same(target)) notify('error', error.message); });
+        // With memory off, only what this plugin hid earlier is put back.
+        if (!enabled()) return void tidy(null).catch(() => {});
+        sync({ target }).then(data => { if (data && same(target)) { notify('state', data); return tidy(data); } }).catch(error => { if (same(target)) notify('error', error.message); });
     };
     host.layeredMemoryInterceptor = async (chat, budget, abort, type) => {
         injection = null;
@@ -235,6 +268,7 @@ export function createRuntime(getContext, host, notify, view) {
         context.chatMetadata[KEY] ??= { ...context.chatMetadata.rph_memory };
         context.chatMetadata[KEY].enabled = value;
         await context.saveMetadata();
+        safeSync();
         if (!value) try { await chain; await request('pause', { paused: true }, target); }
         catch (error) { throw new Error(`本聊天已关闭记忆，后台停止尚未确认：${error.message}`); }
     }

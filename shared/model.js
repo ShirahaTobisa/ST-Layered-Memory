@@ -1,8 +1,8 @@
 export const KEY = 'layered_memory';
-export const VERSION = '0.2.3';
+export const VERSION = '0.2.4';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
-    version: 2, mode: 'classic', keep: 20, concurrency: 5, rawLimit: 5,
+    version: 2, mode: 'classic', keep: 20, autoHide: true, concurrency: 5, rawLimit: 5,
     summary: { url: '', model: '', key: '' },
     embedding: { url: '', model: '', key: '' },
     rerank: { url: '', model: '', key: '' },
@@ -97,6 +97,19 @@ export function turnsFrom(messages) {
             empty: turn.assistant.every(m => !cleanText(m.text)),
         };
     });
+}
+
+// Messages to hide: turns a memory in use stands for (covered holds [first, last] turn numbers), except the newest
+// `keep` floors and messages with attachments or tool calls. The newest floors are counted by position, hidden ones
+// included, so an old floor that was left visible does not keep a place among them.
+export function hideTargets(messages, covered, keep) {
+    const ids = new Set();
+    for (const turn of turnsFrom(messages)) {
+        if (covered.some(([first, last]) => turn.number >= first && turn.number <= last)) for (const id of turn.ids) ids.add(id);
+    }
+    for (const floor of floorsFrom(messages).filter(floor => floor.role !== 'system').slice(-keep)) for (const message of floor.messages) ids.delete(message.id);
+    for (const message of messages) if (message.protected) ids.delete(message.id);
+    return ids;
 }
 
 export function sourceData(turn) {
