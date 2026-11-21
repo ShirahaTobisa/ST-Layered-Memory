@@ -626,3 +626,29 @@ test('a held turn gets no new summary but keeps the one it has', async t => {
     state = store.sync(scope, hold(0), state.revision);
     assert.equal(state.counts.queued || 0, 0); assert.deepEqual(store.memories(id), before);
 });
+
+test('a summary request is given three minutes before it is given up on', async t => {
+    const waits = [];
+    t.mock.method(AbortSignal, 'timeout', ms => { waits.push(ms); return new AbortController().signal; });
+    const p = new Providers(async () => Response.json({ choices: [{ message: { content: '合并总结' } }] }));
+    assert.equal(await p.summarize(configure(config), { kind: 'group', names: {}, prompt: '五条总结', memory: { turn: 1, end: 5 } }), '合并总结');
+    assert.deepEqual(waits, [180000]);
+});
+
+test('a chosen thinking level goes out with summary and test requests; with none chosen the requests say nothing about it', async t => {
+    const { store } = fixture(t), bodies = [], routes = new Map();
+    const engine = new Engine(store, new Providers(async (url, init) => { bodies.push(JSON.parse(init.body)); return Response.json({ choices: [{ message: { content: '总结' } }] }); }));
+    registerRoutes({ post: (path, handler) => routes.set(path, handler) }, () => engine);
+    const check = setting => new Promise(resolve => routes.get('/check')({ user: { directories: { root: 'user' } }, body: { provider: 'summary', setting } }, { json: resolve, status: () => ({ json: resolve }) }));
+    const input = { kind: 'group', names: {}, prompt: '五条总结', memory: { turn: 1, end: 5 } };
+    await engine.providers.summarize(store.config, input);
+    assert.equal((await check({ effort: 'low' })).message, '总结模型接口可用');
+    assert.equal(store.config.summary.effort, '');
+    store.setConfig({ summary: { effort: 'low' } }); store.setConfig({ keep: 30 });
+    await engine.providers.summarize(store.config, input);
+    assert.deepEqual(bodies.map(body => body.reasoning_effort), [undefined, 'low', 'low']);
+    assert.ok(bodies.every(body => !('max_tokens' in body)));
+    assert.equal(store.setConfig({ summary: { effort: '' } }).summary.effort, '');
+    assert.throws(() => store.setConfig({ summary: { effort: 'extreme' } }), /思考强度/);
+    assert.match((await check({ effort: ['low'] })).error, /思考强度/);
+});

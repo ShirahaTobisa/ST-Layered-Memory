@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DEFAULTS, PROVIDERS, assertNumber, cleanText } from '../shared/model.js';
+import { DEFAULTS, PROVIDERS, EFFORTS, assertNumber, cleanText } from '../shared/model.js';
 import { buildClassicSummarySystemPrompt, buildClassicSummaryFinalInstruction, buildClassicSecondarySummaryPrompt } from '../shared/summary-prompts.js';
 
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -22,6 +22,8 @@ export function configure(input, previous = DEFAULTS) {
             next[name].url = url.href.replace(/\/$/, '');
         }
     }
+    next.summary.effort = input.summary?.effort ?? previous.summary?.effort ?? '';
+    if (!Object.keys(EFFORTS).includes(next.summary.effort)) throw new Error('思考强度无效');
     next.mode = input.mode ?? previous.mode ?? DEFAULTS.mode;
     if (!['classic', 'enhanced'].includes(next.mode)) throw new Error('未知记忆模式');
     const keep = Number(input.keep ?? previous.keep);
@@ -44,6 +46,8 @@ export function publicConfig(config) {
 }
 
 const endpoint = (url, suffix) => url.endsWith(`/${suffix}`) ? url : `${url}/${suffix}`;
+// The summary model is told how hard to think only when a level was chosen.
+export const effort = setting => setting.effort ? { reasoning_effort: setting.effort } : {};
 
 export function completionText(data) {
     const choice = data.choices?.[0];
@@ -71,9 +75,10 @@ export class Providers {
 
     async summarize(config, input, signal) {
         const messages = summaryMessages(input);
+        // Thinking models can take well over a minute on one summary, and a request given up on is still paid for.
         const data = await this.request(config.summary, 'chat/completions', {
-            model: config.summary.model, temperature: 0.2, stream: false, messages,
-        }, signal);
+            model: config.summary.model, temperature: 0.2, stream: false, messages, ...effort(config.summary),
+        }, signal, 180000);
         const text = completionText(data);
         if (text.length > 20000) throw new Error('总结过长，保留原文');
         const summary = text.replace(/^```(?:text|markdown)?\s*/i, '').replace(/\s*```$/, '')

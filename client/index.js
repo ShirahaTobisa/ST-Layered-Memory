@@ -1,4 +1,4 @@
-import { KEY, DEFAULTS, VERSION } from '../shared/model.js';
+import { KEY, DEFAULTS, EFFORTS, VERSION } from '../shared/model.js';
 import { createRuntime } from './runtime.js';
 
 const command = (name, label, style = '') => `<button type="button" data-action="${name}" class="${style}">${label}</button>`;
@@ -20,7 +20,8 @@ export function mountMemoryPanel(getContext, host = window, view) {
 ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${title}</legend><p class="lm-muted">${hint}</p>
 <label>API 地址<input name="${key}.url" type="url" placeholder="https://example.com/v1" autocomplete="off"></label>
 <label>API Key<input name="${key}.key" type="password" autocomplete="new-password" placeholder="填写密钥"></label><label class="lm-inline"><input name="${key}.clearKey" type="checkbox">清除已保存的密钥</label>
-<label>模型名称<input name="${key}.model" list="lm-${key}-models" placeholder="选择或手动填写模型名" autocomplete="off"></label><datalist id="lm-${key}-models"></datalist>
+<label>模型名称<input name="${key}.model" list="lm-${key}-models" placeholder="选择或手动填写模型名" autocomplete="off"></label><datalist id="lm-${key}-models"></datalist>${key === 'summary' ? `
+<label>思考强度<select name="summary.effort">${Object.entries(EFFORTS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label><p class="lm-muted">带思考的模型写总结时可能想很久，又慢又费 token，一般选“低”就够。选“不指定”就不传这个参数，由模型自己决定。</p>` : ''}
 <div class="lm-row"><button type="button" data-models="${key}">获取模型列表</button><button type="button" data-check="${key}">测试模型</button></div><small data-provider-status="${key}">测试模型会向所填接口发送一条小请求。</small></fieldset>`).join('')}
 </div><p class="lm-muted">API 地址填根地址。OpenAI 兼容接口通常以 /v1 结尾；Gemini 可使用 /v1beta/openai 兼容地址。密钥留空会保留已保存的值。</p></section>
 <section data-view="rules" hidden><h3>记忆方式</h3><div class="lm-grid"><label class="lm-card lm-inline"><input name="mode" type="radio" value="classic"><span><strong>基础模式</strong><br><small>逐轮总结与旧记忆合并，保留最近原文。</small></span></label><label class="lm-card lm-inline"><input name="mode" type="radio" value="enhanced"><span><strong>增强模式</strong><br><small>在相同总结上增加向量召回，补回有关细节。</small></span></label></div>
@@ -58,7 +59,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         const c = data.counts || {};
         paused = !!data.paused;
         select('[data-action="pause"]').textContent = paused ? '继续后台任务' : '停止后台任务';
-        select('[data-progress]').textContent = `${data.paused ? '已停止' : '后台就绪'} · 等待 ${c.queued || 0} · 运行 ${c.running || 0} · 失败 ${c.error || 0}`;
+        select('[data-progress]').textContent = data.revision ? `${data.paused ? '已停止' : '后台就绪'} · 等待 ${c.queued || 0} · 运行 ${c.running || 0} · 失败 ${c.error || 0}` : '尚未交付聊天';
         select('[data-errors]').textContent = (data.errors || []).map(e => e.error).join('\n');
         select('[data-legacy]').hidden = !data.legacy;
         select('[data-legacy]').textContent = `${data.legacy || 0} 条记忆来自旧版提示词。需要按当前提示词重做时，使用“备份与维护 → 重新整理全部”；会重新调用模型。`;
@@ -172,7 +173,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     select('[data-import]').onchange = event => action(async () => { const file = event.target.files[0]; if (!file) return; if (file.size > 20 * 1024 * 1024) throw new Error('备份文件超过 20 MiB'); const backup = JSON.parse(await file.text()); if (host.confirm('恢复备份中与当前聊天来源匹配的记忆？')) { await runtime.request('import', { backup }); await refreshMemories(); } event.target.value = ''; });
     select('[data-filter]').onsubmit = event => { event.preventDefault(); filter = { query: event.target.elements.query.value, kind: event.target.elements.kind.value }; offset = 0; action(refreshMemories); };
     select('[data-search]').onsubmit = event => { event.preventDefault(); action(async () => { const target = runtime.target; await runtime.sync({ target }); const data = await runtime.request('search', { query: event.target.elements.query.value }, target); select('[data-results]').textContent = data.matches.map(m => `第 ${m.floor} 楼 · ${m.name}\n${m.text}`).join('\n\n') || '没有命中'; }); };
-    getContext().eventSource.on(getContext().eventTypes.CHAT_CHANGED, () => { offset = 0; notice = ''; drafts.clear(); select('[data-enabled]').checked = !!runtime.enabled; select('[data-memories]').replaceChildren(); select('[data-preview]').replaceChildren(); select('[data-used]').textContent = '尚未生成'; select('[data-results]').textContent = ''; if (panel.open && getContext().chatId) action(refreshMemories); });
+    getContext().eventSource.on(getContext().eventTypes.CHAT_CHANGED, () => { offset = 0; notice = ''; drafts.clear(); select('[data-enabled]').checked = !!runtime.enabled; renderState({}); select('[data-chat]').textContent = getContext().chatId || '请打开一段聊天'; select('[data-memories]').replaceChildren(); select('[data-preview]').replaceChildren(); select('[data-used]').textContent = '尚未生成'; select('[data-results]').textContent = ''; if (panel.open && getContext().chatId) action(refreshMemories); });
     const poll = host.setInterval(() => { if (panel.open && !busy && runtime.session) action(async () => { if (!select('[data-view="memories"]').hidden && !select('[data-memories]').contains(document.activeElement)) await refreshMemories(); else renderState(await runtime.request('state')); }); }, 4000);
     const dispose = () => { host.clearInterval(poll); panel.remove(); launcher.remove(); };
     host.addEventListener('beforeunload', () => host.clearInterval(poll));

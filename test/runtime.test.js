@@ -391,3 +391,28 @@ test('a reply costs no chat save of its own and is handed over once generation h
     assert.deepEqual(handoffs.map(messages => messages.map(m => typeof m)), [['string', 'string', 'string', 'string', 'object'], ['string', 'object', 'string', 'string', 'string', 'object']]);
     assert.deepEqual([handoffs[1][1].held, handoffs[1][5].held], [undefined, true]);
 });
+
+test('a request sent right after a memory change carries the revision that change left', async () => {
+    const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
+    await h.runtime.sync();
+    h.ctx.chat[1].mes = 'reply edited';
+    await h.runtime.request('retry');
+    await h.runtime.request('list');
+    assert.equal(h.requests.at(-1).body.revision, 'r2');
+});
+
+test('a chat with its memory off is not handed over; the switch is saved before the server is told', async () => {
+    const h = harness(), base = h.host.fetch, handoffs = () => h.requests.filter(r => r.url.endsWith('/sync')).length;
+    let saved;
+    h.ctx.saveMetadata = async () => { saved = structuredClone(h.ctx.chatMetadata[KEY]); };
+    h.host.fetch = async (url, init) => {
+        if (url.endsWith('/state')) return Response.json({ revision: null });
+        if (url.endsWith('/pause')) throw new Error('page closed');
+        return base(url, init);
+    };
+    await assert.rejects(h.runtime.sync(), /未启用记忆/);
+    await h.runtime.setEnabled(false);
+    assert.equal(saved.enabled, false); assert.equal(handoffs(), 0);
+    await assert.rejects(h.runtime.setEnabled(true), /page closed/);
+    assert.equal(saved.enabled, true); assert.equal(h.runtime.enabled, true); assert.equal(handoffs(), 1);
+});

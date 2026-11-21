@@ -85,9 +85,11 @@ export function createRuntime(getContext, host, notify, view) {
             requireSame(target);
             // A page that has just read the chat file is the truth; after that it continues from its own revision.
             if (!same(session)) {
-                session = { ...target, revision: null };
                 // The server may already hold exactly this chat; then opening it uploads nothing.
                 const stored = await api('state', { scope: target.scope });
+                // With its memory off, a chat the server has never had stays here: nothing starts because someone looked at the panel.
+                if (!stored.revision && !enabled()) throw Object.assign(new Error('本聊天未启用记忆'), { off: true });
+                session = { ...target, revision: null };
                 const digest = stored.revision && await host.crypto.subtle?.digest('SHA-256', new TextEncoder().encode(JSON.stringify(target.messages.map(storedMessage))));
                 requireSame(target);
                 if (digest && stored.revision === [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')) session = { ...target, revision: stored.revision, data: stored };
@@ -148,8 +150,8 @@ export function createRuntime(getContext, host, notify, view) {
         const target = session;
         const result = await api(path, { ...body, scope: target.scope, revision: target.revision });
         if (!same(target)) throw new Error('聊天已切换');
-        // These change which turns a memory stands for, so the hidden floors are checked again.
-        if (['edit', 'retry', 'rebuild', 'clear', 'import'].includes(path)) safeSync();
+        // These change which turns a memory stands for, so the hidden floors are checked again; the caller's next request then goes out with the revision this leaves.
+        if (['edit', 'retry', 'rebuild', 'clear', 'import'].includes(path)) { safeSync(); await chain; }
         return result;
     }
 
@@ -261,16 +263,19 @@ export function createRuntime(getContext, host, notify, view) {
         action: async ({ query }) => { const target = capture(); await sync({ target }); return request('search', { query }, target); },
     });
     async function setEnabled(value) {
-        const context = getContext(), target = capture();
-        if (!context.chatId) throw new Error('请先打开聊天');
-        if (value) { await connect(); await sync({ target }); await request('pause', { paused: false }, target); }
+        const target = capture();
+        if (!getContext().chatId) throw new Error('请先打开聊天');
+        if (value) await connect();
         if (!same(target)) throw new Error('聊天已切换');
+        // The switch is saved before the server is told, so a page closed halfway cannot leave the server working for a chat that reads as off.
+        const context = getContext();
         context.chatMetadata[KEY] ??= { ...context.chatMetadata.rph_memory };
         context.chatMetadata[KEY].enabled = value;
         await context.saveMetadata();
+        if (value) { await sync({ target }); await request('pause', { paused: false }, target); }
         safeSync();
         if (!value) try { await chain; await request('pause', { paused: true }, target); }
-        catch (error) { throw new Error(`本聊天已关闭记忆，后台停止尚未确认：${error.message}`); }
+        catch (error) { if (!error.off) throw new Error(`本聊天已关闭记忆，后台停止尚未确认：${error.message}`); }
     }
     return { api, sync, request, connect, saveConfig, setEnabled, get target() { return capture(); }, get enabled() { return enabled(); }, get config() { return config; }, get session() { return session; } };
 }

@@ -40,6 +40,8 @@ test('settings panel exposes Anima-style model, rules, memory and context contro
     assert.ok(panel.panel.querySelector('[name="summary.url"]'));
     assert.ok(panel.panel.querySelector('[name="embedding.model"]'));
     assert.ok(panel.panel.querySelector('[name="rerank.url"]') && panel.panel.querySelector('[data-check="rerank"]'));
+    assert.deepEqual([...panel.panel.querySelector('[name="summary.effort"]').options].map(option => option.value), ['', 'none', 'minimal', 'low', 'medium', 'high']);
+    assert.equal(panel.panel.querySelector('[name="embedding.effort"], [name="rerank.effort"]'), null);
     assert.ok(panel.panel.querySelector('[name="keep"][type="range"]'));
     assert.ok(panel.panel.querySelector('[name="concurrency"][type="range"]'));
     assert.ok(panel.panel.querySelector('[data-action="export"]'));
@@ -53,7 +55,7 @@ test('failed config saves preserve the draft; successful saves clear the key inp
     const h = harness(), panel = mountMemoryPanel(() => h.context, h.host);
     await new Promise(resolve => setTimeout(resolve, 0));
     const form = panel.panel.querySelector('[data-settings]'), key = form.elements.namedItem('summary.key');
-    key.value = 'unsaved-test-key';
+    key.value = 'unsaved-test-key'; form.elements.namedItem('summary.effort').value = 'low';
     const base = h.host.fetch;
     h.host.fetch = async (url, init) => url.endsWith('/config') ? Response.json({ error: 'save failed' }, { status: 400 }) : base(url, init);
     form.onsubmit({ preventDefault() {} });
@@ -69,6 +71,7 @@ test('failed config saves preserve the draft; successful saves clear the key inp
     form.onsubmit({ preventDefault() {} });
     await new Promise(resolve => setTimeout(resolve, 0));
     assert.equal(received.summary.key, 'unsaved-test-key'); assert.equal(key.value, '');
+    assert.equal(received.summary.effort, 'low'); assert.equal(received.embedding.effort, undefined);
     assert.match(key.placeholder, /已保存/);
     panel.dispose(); h.dom.window.close();
 });
@@ -89,6 +92,18 @@ test('a failed memory switch does not display an unsaved enabled state', async (
     await new Promise(resolve => setTimeout(resolve, 0));
     assert.equal(toggle.checked, true);
     assert.match(panel.panel.querySelector('[data-status]').textContent, /edit failed/);
+    panel.dispose(); h.dom.window.close();
+});
+
+test('switching chats clears what the memory page showed for the previous chat', async () => {
+    const h = harness(), panel = mountMemoryPanel(() => h.context, h.host), base = h.host.fetch, text = query => panel.panel.querySelector(query).textContent;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    h.host.fetch = async (url, init) => url.endsWith('/list') ? Response.json({ revision: 'r1', counts: { queued: 2 }, summaries: 7, items: [], filteredTotal: 0 }) : base(url, init);
+    await panel.panel.querySelector('[data-tab="memories"]').onclick();
+    assert.deepEqual([text('[data-count="summaries"]'), text('[data-chat]')], ['7', 'chat']); assert.match(text('[data-progress]'), /等待 2/);
+    h.context.chatId = 'other';
+    for (const listener of h.listeners.get('CHAT_CHANGED')) listener();
+    assert.deepEqual([text('[data-count="summaries"]'), text('[data-chat]'), text('[data-progress]')], ['0', 'other', '尚未交付聊天']);
     panel.dispose(); h.dom.window.close();
 });
 

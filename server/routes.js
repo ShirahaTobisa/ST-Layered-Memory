@@ -1,5 +1,5 @@
 import { scopeId, sourceTurns, groupHash, shownText } from './store.js';
-import { configure, hash, publicConfig, vectorSignature, completionText } from './providers.js';
+import { configure, hash, publicConfig, vectorSignature, completionText, effort } from './providers.js';
 import { recall, rawSearch, unpackEmbedding } from './search.js';
 import { VERSION, PROVIDERS, stripVector, cleanText, eligibleGroups } from '../shared/model.js';
 
@@ -40,7 +40,8 @@ export function registerRoutes(router, getEngine) {
             const [vector] = await engine.providers.embed(config, ['连接测试']);
             return { message: `向量模型可用，${vector.length} 维` };
         }
-        const data = await engine.providers.request(config.summary, 'chat/completions', { model: config.summary.model, stream: false, temperature: 0, max_tokens: 32, messages: [{ role: 'user', content: '只回复 OK' }] });
+        // No output cap: a thinking model spends part of its answer on thinking and would be cut off before it replies.
+        const data = await engine.providers.request(config.summary, 'chat/completions', { model: config.summary.model, stream: false, temperature: 0, messages: [{ role: 'user', content: '只回复 OK' }], ...effort(config.summary) });
         completionText(data);
         return { message: '总结模型接口可用' };
     });

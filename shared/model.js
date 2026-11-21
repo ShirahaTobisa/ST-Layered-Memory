@@ -1,13 +1,15 @@
 export const KEY = 'layered_memory';
-export const VERSION = '0.2.4';
+export const VERSION = '0.2.5';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
     version: 2, mode: 'classic', keep: 20, autoHide: true, concurrency: 5, rawLimit: 5,
-    summary: { url: '', model: '', key: '' },
+    summary: { url: '', model: '', key: '', effort: '' },
     embedding: { url: '', model: '', key: '' },
     rerank: { url: '', model: '', key: '' },
 };
 export const PROVIDERS = ['summary', 'embedding', 'rerank'];
+// How hard the summary model is told to think (reasoning_effort); with none chosen the request says nothing about it.
+export const EFFORTS = { '': '不指定', none: '关闭', minimal: '最低', low: '低', medium: '中', high: '高' };
 
 // SillyTavern also uses is_system for hidden ordinary dialogue.
 export function memoryRole(message) {
