@@ -3,8 +3,15 @@ import { createRuntime } from './runtime.js';
 import { mountCitations } from './citations.js';
 
 const command = (name, label, style = '') => `<button type="button" data-action="${name}" class="${style}">${label}</button>`;
-const providers = [['summary', '总结模型', '将每轮对话整理为记忆；基础和增强模式都需要。'], ['embedding', '向量模型', '增强模式使用，用当前输入找回相关的逐轮记忆。'],
-    ['rerank', '重排模型', '可选。候选多于召回条数或设置了最低分时，由它挑出最贴合的记忆；接口是 /rerank，留空不用。']];
+const sw = attrs => `<span class="lm-switch"><input ${attrs} type="checkbox"><span class="lm-switch-knob"></span></span>`;
+const providers = [
+    ['summary', '总结模型', '必选', 'var(--lm-c1)', '将每轮对话整理为长期记忆；基础与增强模式都需要。'],
+    ['embedding', '向量模型', '增强', 'var(--lm-c2)', '用于语义混合召回；未建索引或断线时自动降级关键词检索。'],
+    ['rerank', '重排模型', '可选', 'var(--lm-c3)', '候选多于上限或设了最低分时调用 /rerank 精选，留空不用。'],
+];
+const LAYERS_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 12 12 17 22 12"/><polyline points="2 17 12 22 22 17"/></svg>';
+const EYE_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+const CLOSE_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 
 export function mountMemoryPanel(getContext, host = window, view) {
     const document = host.document;
@@ -13,39 +20,105 @@ export function mountMemoryPanel(getContext, host = window, view) {
     document.querySelector('#extensions_settings')?.append(launcher);
     const panel = document.createElement('dialog'); panel.id = 'layered-memory';
     panel.setAttribute('aria-labelledby', 'lm-title');
-    panel.innerHTML = `<header class="lm-row lm-bar"><h2 id="lm-title" class="lm-grow">分层记忆 <small>${VERSION}</small></h2><label class="lm-inline"><input data-enabled type="checkbox">启用记忆</label>${command('close', '关闭')}</header>
-<nav class="lm-row lm-nav" aria-label="记忆设置分区">
-<button type="button" data-tab="connection" aria-pressed="true">连接与模型</button><button type="button" data-tab="rules" aria-pressed="false">记忆规则</button><button type="button" data-tab="memories" aria-pressed="false">记忆管理</button><button type="button" data-tab="context" aria-pressed="false">本轮上下文</button></nav>
+    panel.innerHTML = `<header class="lm-header">
+<div class="lm-brand"><span class="lm-brand-icon">${LAYERS_SVG}</span><h2 id="lm-title" class="lm-title">分层记忆</h2><span class="lm-ver-badge"><span class="lm-dot" data-conn-dot></span>${VERSION}</span></div>
+<div class="lm-header-right"><label class="lm-inline"><span class="lm-enabled-full">启用记忆</span><span class="lm-enabled-short">启用</span>${sw('data-enabled')}</label><button type="button" data-action="close" class="lm-icon-btn" aria-label="关闭面板" title="关闭">${CLOSE_SVG}</button></div>
+</header>
+<div class="lm-nav-wrap"><nav class="lm-nav" aria-label="记忆设置分区"><div class="lm-tab-pill" data-tab-pill></div>
+<button type="button" data-tab="connection" aria-pressed="true">连接与模型</button><button type="button" data-tab="rules" aria-pressed="false">记忆规则</button><button type="button" data-tab="memories" aria-pressed="false">记忆管理<span class="lm-nav-count" data-nav-count></span></button><button type="button" data-tab="context" aria-pressed="false">本轮上下文</button></nav></div>
 <main class="lm-content"><form id="lm-settings" data-settings>
-<section data-view="connection"><h3>连接与模型</h3><p class="lm-muted">配置保存在当前酒馆账号的服务器数据库中。先配置总结模型，再开启记忆。</p><div class="lm-grid">
-${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${title}</legend><p class="lm-muted">${hint}</p>
-<label>API 地址<input name="${key}.url" type="url" placeholder="https://example.com/v1" autocomplete="off"></label>
-<label>API Key<input name="${key}.key" type="password" autocomplete="new-password" placeholder="填写密钥"></label><label class="lm-inline"><input name="${key}.clearKey" type="checkbox">清除已保存的密钥</label>
-<label>模型名称<input name="${key}.model" list="lm-${key}-models" placeholder="选择或手动填写模型名" autocomplete="off"></label><datalist id="lm-${key}-models"></datalist>${key === 'summary' ? `
-<label>思考强度<select name="summary.effort">${Object.entries(EFFORTS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label><p class="lm-muted">带思考的模型写总结时可能想很久，又慢又费 token，一般选“低”就够。选“不指定”就不传这个参数，由模型自己决定。</p>` : ''}
-<div class="lm-row"><button type="button" data-models="${key}">获取模型列表</button><button type="button" data-check="${key}">测试模型</button></div><small data-provider-status="${key}">测试模型会向所填接口发送一条小请求。</small></fieldset>`).join('')}
-</div><p class="lm-muted">API 地址填根地址。OpenAI 兼容接口通常以 /v1 结尾；Gemini 可使用 /v1beta/openai 兼容地址。密钥留空会保留已保存的值。</p></section>
-<section data-view="rules" hidden><h3>记忆方式</h3><div class="lm-grid"><label class="lm-card lm-inline"><input name="mode" type="radio" value="classic"><span><strong>基础模式</strong><br><small>逐轮总结与旧记忆合并，保留最近原文。</small></span></label><label class="lm-card lm-inline"><input name="mode" type="radio" value="enhanced"><span><strong>增强模式</strong><br><small>在相同总结上增加混合召回，补回有关细节。</small></span></label></div>
-<div class="lm-card"><label><span>保留最近 <output data-value="keep">20</output> 楼原文</span><input name="keep" type="range" min="10" max="40" step="2" value="20"></label><p class="lm-muted">连续同角色发言合并算一楼。普通一问一答是两楼；这部分始终保留原文。</p><label class="lm-inline"><input name="autoHide" type="checkbox">已总结的旧楼自动隐藏</label><p class="lm-muted">保留楼数以外、已有记忆的楼层自动隐藏，整理聊天界面；模型仍收到未合并轮次的用户输入与总结。只会取消插件自己隐藏的楼层；手动或其他脚本隐藏的不动，插件隐藏后你手动取消的也不会再被隐藏。</p><label><span>总结并发 <output data-value="concurrency">5</output></span><input name="concurrency" type="range" min="1" max="10" step="1" value="5"></label><p class="lm-muted">同时进行的总结请求数量，默认 5。接口限流时可调低；临时错误会自动等待后重试，最多 3 次。</p></div>
-<div class="lm-grid"><div class="lm-card"><strong>近期</strong><small>最近原文保持完整</small></div><div class="lm-card"><strong>较早</strong><small>用户原输入＋逐轮总结</small></div><div class="lm-card"><strong>更早</strong><small>最近 25 轮之外，每 5 轮合并</small></div></div>
-<div class="lm-card"><label class="lm-inline"><input name="citations" type="checkbox">回复中标注记忆来源，点击编号查看</label><label class="lm-inline"><input name="recallShortContext" type="checkbox">短输入时补充上一轮检索语境</label><label class="lm-inline"><input name="recallExcludeRaw" type="checkbox">召回时跳过已完整发送原文的近期轮次</label><div class="lm-grid"><label>向量相似度门槛<input name="recallThreshold" type="number" min="0.1" max="0.9" step="0.01"></label><label>最多召回条数<input name="recallLimit" type="number" min="3" max="20" step="1"></label><label>重排最低分（0 不截断）<input name="rerankThreshold" type="number" min="0" max="1" step="0.05"></label></div><p class="lm-muted">增强模式结合向量与关键词查找相关经历；短输入会结合上一轮语境。结果按时间排列，酒馆负责最终上下文容量。</p></div>
-<div class="lm-card"><label class="lm-inline"><input data-raw-search type="checkbox">允许模型检索聊天原文</label><p class="lm-muted">用于找回总结省略的原话，需要主模型支持工具调用。默认关闭。</p><label>每次原文检索结果数<input name="rawLimit" type="number" min="5" max="10" value="5"></label></div><div class="lm-row">${command('defaults', '恢复默认规则')}</div></section></form>
-<section data-view="memories" hidden><div class="lm-row"><div class="lm-grow"><h3>记忆管理</h3><p data-chat class="lm-muted">请打开一段聊天</p></div>${command('sync', '刷新记录')}</div>
-<p>逐轮 <b data-count="summaries">0</b> · 合并 <b data-count="groups">0</b> · 已索引 <b data-count="indexed">0</b></p>
-<p data-progress role="status">尚未交付聊天</p><div data-stages class="lm-grid"></div><p data-compression class="lm-muted" hidden></p><div data-errors class="lm-log lm-danger"></div><p data-legacy class="lm-muted" hidden></p>
-<div class="lm-row">${command('retry', '补录 / 重试', 'lm-primary')}${command('pause', '停止后台任务')}</div>
-<form data-filter class="lm-row"><input name="query" class="lm-grow" placeholder="搜索记忆正文" aria-label="搜索记忆正文"><select name="kind" aria-label="记忆类型"><option value="all">全部记忆</option><option value="summary">逐轮总结</option><option value="group">合并总结</option></select><select name="order" aria-label="记忆顺序"><option value="desc">最新在前</option><option value="asc">最早在前</option></select><button type="submit">筛选</button></form><div data-memories></div>
+<section data-view="connection"><div><h3>连接与模型</h3><p class="lm-muted">配置与密钥仅保存在服务器数据库中。先配置总结模型，再开启记忆；支持 OpenAI 兼容与 Gemini <code>/v1beta/openai</code> 根地址。</p></div>
+<div class="lm-grid-3">${providers.map(([key, title, badge, dot, hint]) => `<fieldset class="lm-card lm-provider-card"><div class="lm-provider-head"><span class="lm-provider-title"><span class="lm-dot" style="background:${dot}"></span>${title}</span><span class="lm-chip${key === 'summary' ? ' lm-chip-accent' : ''}">${badge}</span></div><p class="lm-muted">${hint}</p>
+<label><span class="lm-field-label">API 根地址</span><input name="${key}.url" type="url" placeholder="https://example.com/v1" autocomplete="off"></label>
+<div class="lm-between"><span class="lm-field-label">API Key</span><label class="lm-inline lm-muted"><input name="${key}.clearKey" type="checkbox">清除已保存</label></div>
+<div class="lm-pw-wrap"><input name="${key}.key" type="password" autocomplete="new-password" placeholder="填写密钥" aria-label="${title} API Key"><button type="button" class="lm-pw-eye" data-toggle-pw="${key}" title="显示或隐藏密钥" aria-label="显示或隐藏密钥">${EYE_SVG}</button></div>
+<label><span class="lm-field-label">模型名称</span><input name="${key}.model" list="lm-${key}-models" placeholder="选择或手动填写模型名" autocomplete="off"></label><datalist id="lm-${key}-models"></datalist>${key === 'summary' ? `
+<div class="lm-between"><span class="lm-field-label">思考强度</span><small data-effort-note>带思考模型一般选“低”即可</small></div>
+<select name="summary.effort" class="lm-sr-select" aria-label="思考强度">${Object.entries(EFFORTS).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select>
+<div class="lm-effort-pills" data-effort-pills>${Object.entries(EFFORTS).map(([value, label]) => `<button type="button" data-effort-pick="${value}" aria-pressed="${value === '' ? 'true' : 'false'}">${label}</button>`).join('')}</div>` : ''}
+<div class="lm-provider-foot"><div class="lm-provider-btns"><button type="button" data-models="${key}">获取模型</button><button type="button" data-check="${key}">测试模型</button></div><small data-provider-status="${key}">测试会向所填接口发送一条小请求。</small></div></fieldset>`).join('')}
+</div><p class="lm-muted">密钥留空会保留已保存的值；模型测试不会阻塞切换标签或关闭面板。</p></section>
+<section data-view="rules" hidden>
+<div class="lm-grid-2"><label class="lm-card lm-mode-card"><input name="mode" type="radio" value="classic"><span><strong>基础模式</strong><br><small>两级时间线压缩：逐轮总结与每 5 轮合并，保留最近原文。</small></span></label><label class="lm-card lm-mode-card"><input name="mode" type="radio" value="enhanced"><span><strong>增强模式</strong><br><small>在脉络总结上叠加向量 + 防噪声关键词混合召回与可选重排。</small></span></label></div>
+<div class="lm-card"><div class="lm-between"><strong>三层窗口预览</strong><small data-layer-summary>合并 15 轮 · 逐轮 15 轮 · 原文 10 轮（以 40 轮为例）</small></div>
+<div class="lm-layer-bar" aria-hidden="true"><div class="lm-layer-seg" data-layer-seg="merged" style="width:37.5%"></div><div class="lm-layer-seg" data-layer-seg="summary" style="width:37.5%"></div><div class="lm-layer-seg" data-layer-seg="raw" style="width:25%"></div></div>
+<div class="lm-grid-3"><span class="lm-inline"><span class="lm-legend-dot" style="background:var(--lm-c3)"></span><small>更早：25 轮外每 5 轮合并</small></span><span class="lm-inline"><span class="lm-legend-dot" style="background:var(--lm-c2)"></span><small>较早：原输入＋逐轮总结</small></span><span class="lm-inline"><span class="lm-legend-dot" style="background:var(--lm-c1)"></span><small>近期：保留最近原文</small></span></div></div>
+<div class="lm-card"><div class="lm-grid-2">
+<label><span class="lm-between"><span class="lm-field-label">保留最近原文楼数</span><span class="lm-val-pill"><output data-value="keep">20</output> 楼</span></span><input name="keep" type="range" min="10" max="40" step="2" value="20"><small>连续同角色合并算一楼，普通一问一答为两楼。</small></label>
+<label><span class="lm-between"><span class="lm-field-label">总结并发</span><span class="lm-val-pill"><output data-value="concurrency">5</output> 路</span></span><input name="concurrency" type="range" min="1" max="10" step="1" value="5"><small>429 或网络波动自动退避重试最多 3 次。</small></label>
+</div><div class="lm-divider lm-card" style="padding:11px 0 0;border:0;background:transparent">
+<label class="lm-toggle-row"><span class="lm-toggle-copy"><span>已总结的旧楼自动隐藏</span><small>保留窗口外、已有生效记忆的楼层自动隐藏（可明显减轻云酒馆渲染压力）；未合并轮次发送时原位补回用户输入，不触碰手动隐藏。</small></span>${sw('name="autoHide"')}</label>
+<label class="lm-toggle-row"><span class="lm-toggle-copy"><span>回复中标注记忆来源 <code>[M编号]</code></span><small>点击角色回复里的编号弹出对应总结与原文；代码块和用户输入自动跳过。</small></span>${sw('name="citations"')}</label>
+</div></div>
+<div class="lm-card" data-recall-card><div class="lm-between"><strong>增强召回与原文工具</strong><small data-recall-hint>增强模式生效</small></div>
+<label><span class="lm-between"><span class="lm-field-label">向量相似度门槛</span><span class="lm-val-pill"><output data-value="recallThreshold">0.48</output></span></span><input name="recallThreshold" type="range" min="0.1" max="0.9" step="0.02" value="0.48"></label>
+<div class="lm-grid-3"><label><span class="lm-field-label">最多召回条数 (3–20)</span><input name="recallLimit" type="number" min="3" max="20" step="1" value="10"></label><label><span class="lm-field-label">重排最低分 (0 不截断)</span><input name="rerankThreshold" type="number" min="0" max="1" step="0.05" value="0"></label><label><span class="lm-field-label">原文工具结果数 (5–10)</span><input name="rawLimit" type="number" min="5" max="10" step="1" value="5"></label></div>
+<div class="lm-divider lm-card" style="padding:11px 0 0;border:0;background:transparent">
+<label class="lm-toggle-row"><span class="lm-toggle-copy"><span>召回时跳过近期已完整发送原文的轮次</span></span>${sw('name="recallExcludeRaw"')}</label>
+<label class="lm-toggle-row"><span class="lm-toggle-copy"><span>短输入时补充上一轮检索语境</span></span>${sw('name="recallShortContext"')}</label>
+<label class="lm-toggle-row"><span class="lm-toggle-copy"><span>允许模型检索聊天原文</span><small>注册 <code>layered_memory_search</code>，用于找回总结省略的原话（需主模型支持工具调用）。</small></span>${sw('data-raw-search')}</label>
+</div></div>
+<div class="lm-row" style="justify-content:flex-end">${command('defaults', '恢复默认规则')}</div></section></form>
+<section data-view="memories" hidden>
+<div class="lm-card"><div class="lm-between"><div class="lm-grow"><h3>记忆管理</h3><p data-chat class="lm-muted">请打开一段聊天</p></div><div class="lm-row">${command('retry', '补录 / 重试', 'lm-primary')}${command('pause', '停止后台任务')}${command('sync', '刷新')}</div></div>
+<div class="lm-between"><span>逐轮 <b data-count="summaries">0</b> · 合并 <b data-count="groups">0</b> · 已索引 <b data-count="indexed">0</b></span><small data-progress role="status">尚未交付聊天</small></div>
+<div data-stages class="lm-grid-3"></div><p data-compression class="lm-muted" hidden></p><div data-errors class="lm-log lm-danger"></div><p data-legacy class="lm-muted" hidden></p></div>
+<form data-filter class="lm-row"><input name="query" class="lm-grow" placeholder="搜索记忆正文" aria-label="搜索记忆正文"><select name="kind" aria-label="记忆类型"><option value="all">全部记忆</option><option value="summary">逐轮总结</option><option value="group">合并总结</option></select><select name="order" aria-label="记忆顺序"><option value="desc">最新在前</option><option value="asc">最早在前</option></select><button type="submit">筛选</button></form>
+<div data-memories></div>
 <div class="lm-row">${command('previous', '上一页')}<span data-page class="lm-grow">1 / 1</span>${command('next', '下一页')}</div>
-<details class="lm-card"><summary>备份与维护</summary><p class="lm-muted">导出当前聊天的记忆，不包含 API Key。数据库完整备份需停止酒馆后复制用户目录中的 layered-memory 文件夹。</p><div class="lm-row">${command('export', '导出记忆')}${command('import', '恢复备份')}${command('reindex', '重建向量')}${command('rebuild', '重新整理全部')}${command('clear', '清空当前记忆', 'lm-danger')}</div></details><input data-import type="file" accept="application/json,.json" hidden></section>
-<section data-view="context" hidden><h3>本轮上下文</h3><p class="lm-muted">查看上次发送时使用的记忆和实际请求内容。切换聊天后会清空记录。</p><div data-used class="lm-card lm-log">尚未生成</div><details class="lm-card"><summary>查看实际发送的上下文</summary><div data-preview class="lm-log"></div></details>
-<h3>查找聊天原话</h3><form data-search class="lm-row"><input name="query" class="lm-grow" maxlength="300" required placeholder="输入人名、物品或约定的关键词" aria-label="原文关键词"><button type="submit">搜索原文</button></form><div data-results class="lm-text"></div></section>
-</main><footer class="lm-row lm-bar"><p data-status role="status" aria-live="polite" class="lm-grow">正在连接服务器…</p>${command('connect', '重新连接')}<button type="submit" form="lm-settings" class="lm-primary">保存设置</button></footer>`;
+<details class="lm-card"><summary>备份与维护</summary><p class="lm-muted">导出当前聊天的记忆与固定编号，不包含 API Key。数据库完整备份需停止酒馆后复制用户目录中的 layered-memory 文件夹。</p><div class="lm-row">${command('export', '导出记忆')}${command('import', '恢复备份')}${command('reindex', '重建向量')}${command('rebuild', '重新整理全部')}${command('clear', '清空当前记忆', 'lm-danger')}</div></details><input data-import type="file" accept="application/json,.json" hidden></section>
+<section data-view="context" hidden>
+<div class="lm-card"><h3>本轮上下文</h3><p class="lm-muted">查看上次发送时使用的记忆和实际请求内容。切换聊天后会清空记录。</p><div data-used class="lm-log">尚未生成</div><details><summary>查看实际发送的上下文</summary><div data-preview class="lm-log"></div></details></div>
+<div class="lm-card"><h3>查找聊天原话</h3><form data-search class="lm-row"><input name="query" class="lm-grow" maxlength="300" required placeholder="输入人名、物品或约定的关键词" aria-label="原文关键词"><button type="submit" class="lm-primary">搜索原文</button></form><div data-results class="lm-text"></div></div></section>
+</main><footer class="lm-footer"><div class="lm-status-wrap"><span class="lm-dirty-dot" data-dirty-dot hidden></span><p data-status role="status" aria-live="polite" class="lm-grow lm-muted">正在连接服务器…</p></div><div class="lm-footer-actions">${command('connect', '重新连接')}<button type="submit" form="lm-settings" class="lm-primary">保存设置</button></div></footer>`;
     document.body.append(panel);
     const select = query => panel.querySelector(query), settings = () => getContext().extensionSettings[KEY];
     const drafts = new Map();
     let offset = 0, total = 0, busy = 0, polling = false, dirty = false, paused = false, notice = '', filter = { query: '', kind: 'all', order: 'desc' };
-    let actions = Promise.resolve(), listSignature = '', refreshSequence = 0;
+    let actions = Promise.resolve(), listSignature = '', refreshSequence = 0, activeTab = 'connection';
     const status = text => { select('[data-status]').textContent = text; launcher.querySelector('small').textContent = text; };
+    const setDirty = flag => { dirty = flag; select('[data-dirty-dot]').hidden = !flag; };
+
+    // Sliding tab pill (pure transform, ResizeObserver-synced for 60fps smooth transitions).
+    const navEl = select('.lm-nav'), pillEl = select('[data-tab-pill]');
+    function syncTabPill(instant = false) {
+        const tab = select(`[data-tab="${activeTab}"]`);
+        if (!tab || !navEl || !pillEl || !tab.getBoundingClientRect) return;
+        const navRect = navEl.getBoundingClientRect(), rect = tab.getBoundingClientRect();
+        if (!rect.width) return;
+        if (instant) pillEl.style.transition = 'none';
+        pillEl.style.opacity = '1';
+        pillEl.style.width = `${rect.width}px`;
+        pillEl.style.transform = `translateX(${rect.left - navRect.left}px)`;
+        if (instant) { void pillEl.offsetWidth; pillEl.style.transition = ''; }
+    }
+    let navObserver = null;
+    if (typeof host.ResizeObserver === 'function') {
+        navObserver = new host.ResizeObserver(() => syncTabPill(true));
+        navObserver.observe(navEl);
+    }
+
+    function syncRuleVisuals() {
+        const keep = Number(select('[name="keep"]')?.value) || DEFAULTS.keep;
+        const rawTurns = Math.min(40, Math.round(keep / 2));
+        const mergedTurns = 15;
+        const summaryTurns = Math.max(0, 40 - mergedTurns - rawTurns);
+        const segMerged = select('[data-layer-seg="merged"]'), segSummary = select('[data-layer-seg="summary"]'), segRaw = select('[data-layer-seg="raw"]');
+        if (segMerged) segMerged.style.width = `${mergedTurns / 40 * 100}%`;
+        if (segSummary) segSummary.style.width = `${summaryTurns / 40 * 100}%`;
+        if (segRaw) segRaw.style.width = `${rawTurns / 40 * 100}%`;
+        const summaryLabel = select('[data-layer-summary]');
+        if (summaryLabel) summaryLabel.textContent = `合并 ${mergedTurns} 轮 · 逐轮 ${summaryTurns} 轮 · 原文 ${rawTurns} 轮（以 40 轮为例）`;
+        const enhanced = select('[name="mode"][value="enhanced"]')?.checked;
+        const recallCard = select('[data-recall-card]'), recallHint = select('[data-recall-hint]');
+        if (recallCard) recallCard.style.opacity = enhanced ? '1' : '.72';
+        if (recallHint) recallHint.textContent = enhanced ? '增强模式已启用' : '基础模式下召回不调用';
+    }
+
+    function syncEffortPills(value) {
+        for (const btn of panel.querySelectorAll('[data-effort-pick]')) btn.setAttribute('aria-pressed', String(btn.dataset.effortPick === String(value ?? '')));
+    }
+
     const runtime = createRuntime(getContext, host, (type, data) => {
         if (type === 'error') status(notice = data);
         if (type === 'state') renderState(data);
@@ -57,8 +130,11 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         }
     }, view);
     const disposeCitations = mountCitations(getContext, runtime, host);
+
     function renderState(data) {
         for (const node of panel.querySelectorAll('[data-count]')) node.textContent = data[node.dataset.count] || 0;
+        const navCount = select('[data-nav-count]');
+        if (navCount) navCount.textContent = data.total ? String(data.total) : '';
         const c = data.counts || {};
         paused = !!data.paused;
         select('[data-action="pause"]').textContent = paused ? '继续后台任务' : '停止后台任务';
@@ -66,7 +142,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         const stages = select('[data-stages]'); stages.replaceChildren();
         for (const stage of data.progress || []) {
             if (stage.kind === 'embedding' && runtime.config?.mode !== 'enhanced' && !stage.total) continue;
-            const item = document.createElement('div'); item.className = 'lm-card';
+            const item = document.createElement('div'); item.className = 'lm-stage-card';
             const label = document.createElement('label'), progress = document.createElement('progress');
             label.textContent = `${{ summary: '逐轮总结', embedding: '向量索引', group: '旧轮合并' }[stage.kind]} ${stage.done} / ${stage.total}${stage.failed ? ` · 失败 ${stage.failed}` : ''}`;
             progress.max = Math.max(1, stage.total); progress.value = stage.done;
@@ -81,6 +157,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         select('[data-legacy]').hidden = !data.legacy;
         select('[data-legacy]').textContent = `${data.legacy || 0} 条记忆来自旧版提示词。需要按当前提示词重做时，使用“备份与维护 → 重新整理全部”；会重新调用模型。`;
     }
+
     function fill(config) {
         for (const input of select('[data-settings]').elements) {
             if (!input.name) continue;
@@ -94,8 +171,11 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         }
         select('[data-raw-search]').checked = !!settings().rawSearch;
         for (const output of panel.querySelectorAll('[data-value]')) output.textContent = config[output.dataset.value] ?? DEFAULTS[output.dataset.value];
-        dirty = false;
+        syncEffortPills(select('[name="summary.effort"]')?.value ?? '');
+        syncRuleVisuals();
+        setDirty(false);
     }
+
     function readConfig() {
         const value = {};
         for (const input of select('[data-settings]').elements) {
@@ -108,6 +188,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         }
         return value;
     }
+
     function action(fn) {
         const target = runtime.target;
         busy++; panel.setAttribute('aria-busy', 'true');
@@ -115,6 +196,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             .finally(() => { if (!--busy) panel.removeAttribute('aria-busy'); });
         return actions;
     }
+
     async function refreshMemories({ poll = false } = {}) {
         const sequence = ++refreshSequence;
         const data = await runtime.request('list', { offset, ...filter });
@@ -130,33 +212,52 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         const expanded = new Set([...container.querySelectorAll('article')].filter(row => row.querySelector('details').open).map(row => row.dataset.memoryId));
         listSignature = signature; container.replaceChildren();
         if (!data.items.length) container.textContent = '暂无匹配的记忆。最新两轮要等后面聊完才整理；也可点击“补录 / 重试”。';
+        const fragment = document.createDocumentFragment();
         for (const memory of data.items) {
             const row = document.createElement('article'); row.className = 'lm-card'; row.dataset.memoryId = memory.id;
-            row.innerHTML = '<div class="lm-row"><strong class="lm-grow"></strong><label class="lm-inline"><input type="checkbox">使用</label></div><p class="lm-text"></p><details><summary>编辑与来源</summary><textarea rows="5" aria-label="编辑记忆正文"></textarea><div class="lm-row"><button type="button" data-save>保存修改</button><button type="button" data-retry>重新生成</button></div><div class="lm-log"></div></details>';
-            row.querySelector('strong').textContent = `${memory.no ? `M${memory.no} · ` : ''}第 ${memory.turn}${memory.end ? `–${memory.end}` : ''} 轮 · ${memory.kind === 'group' ? '合并' : '逐轮'}${memory.indexed ? ' · 已索引' : ''}`;
+            if (!memory.enabled) row.dataset.disabled = 'true';
+            row.innerHTML = `<div class="lm-between"><div class="lm-row lm-grow"><span class="lm-mem-no" hidden></span><strong></strong></div><label class="lm-inline"><small>使用</small>${sw('')}</label></div><p class="lm-text"></p><details><summary>编辑与来源</summary><textarea rows="5" aria-label="编辑记忆正文"></textarea><div class="lm-row"><button type="button" data-save class="lm-primary">保存修改</button><button type="button" data-retry>重新生成</button></div><div class="lm-log"></div></details>`;
+            const noBadge = row.querySelector('.lm-mem-no');
+            if (memory.no) { noBadge.hidden = false; noBadge.textContent = `M${memory.no}`; }
+            row.querySelector('strong').textContent = `第 ${memory.turn}${memory.end ? `–${memory.end}` : ''} 轮 · ${memory.kind === 'group' ? '合并' : '逐轮'}${memory.indexed ? ' · 已索引' : ''}`;
             row.querySelector('.lm-text').textContent = memory.summary;
             if (Number.isFinite(memory.originalChars)) {
                 const size = document.createElement('small');
-                size.textContent = `来源 ${memory.originalChars} 字 · 总结 ${memory.summaryChars} 字`;
+                const pct = memory.originalChars > 0 ? Math.max(0, Math.round((1 - (memory.summaryChars ?? memory.summary.length) / memory.originalChars) * 100)) : 0;
+                size.textContent = `来源 ${memory.originalChars} 字 → 总结 ${memory.summaryChars} 字${pct ? `（-${pct}%）` : ''}`;
                 row.querySelector('.lm-text').after(size);
             }
             const input = row.querySelector('input'); input.checked = memory.enabled;
             input.onchange = () => {
-                const enabled = input.checked;
-                input.checked = memory.enabled;
-                action(async () => { await runtime.request('edit', { id: memory.id, enabled }); await refreshMemories(); });
+                // Optimistic toggle for responsive Cloud ST feel; reverts automatically if the server rejects it.
+                const enabled = input.checked, previous = memory.enabled;
+                row.dataset.disabled = enabled ? 'false' : 'true';
+                action(async () => {
+                    try {
+                        await runtime.request('edit', { id: memory.id, enabled });
+                        await refreshMemories();
+                    } catch (error) {
+                        input.checked = previous;
+                        row.dataset.disabled = previous ? 'false' : 'true';
+                        throw error;
+                    }
+                });
             };
             const text = row.querySelector('textarea'); text.value = drafts.get(memory.id) ?? memory.summary;
             if (drafts.has(memory.id) || expanded.has(memory.id)) row.querySelector('details').open = true;
             text.oninput = () => drafts.set(memory.id, text.value);
             row.querySelector('[data-save]').onclick = () => action(async () => { await runtime.request('edit', { id: memory.id, summary: text.value }); drafts.delete(memory.id); await refreshMemories(); status('记忆已保存，相关索引将重新建立'); });
             row.querySelector('[data-retry]').onclick = () => action(async () => { if (host.confirm('重新生成这条记忆？当前编辑内容将被模型结果替换。')) { await runtime.request('retry', { id: memory.id }); drafts.delete(memory.id); await refreshMemories(); } });
-            row.querySelector('.lm-log').textContent = memory.sources.map(m => `${m.name}：${m.text}`).join('\n\n'); container.append(row);
+            row.querySelector('.lm-log').textContent = memory.sources.map(m => `${m.name}：${m.text}`).join('\n\n');
+            fragment.append(row);
         }
+        container.append(fragment);
     }
+
     async function open() {
         panel.showModal();
         select('[data-enabled]').checked = !!runtime.enabled;
+        if (typeof host.requestAnimationFrame === 'function') host.requestAnimationFrame(() => syncTabPill(true));
         if (!dirty) await action(async () => {
             fill((await runtime.connect()).config);
             status(notice || '服务器已连接');
@@ -166,6 +267,8 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     function close() { if ((dirty || drafts.size) && !host.confirm('还有未保存的修改，确定关闭面板？')) return; panel.close(); }
     launcher.onclick = open;
     panel.addEventListener('cancel', event => { event.preventDefault(); close(); });
+    panel.addEventListener('click', event => { if (event.target === panel) close(); });
+
     select('[data-enabled]').checked = !!runtime.enabled;
     select('[data-enabled]').onchange = () => {
         const input = select('[data-enabled]'), enabled = input.checked;
@@ -175,8 +278,32 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             if (panel.open && !select('[data-view="memories"]').hidden && getContext().chatId) await refreshMemories().catch(() => {});
         }).finally(() => { input.disabled = false; input.checked = !!runtime.enabled; });
     };
-    select('[data-settings]').addEventListener('input', event => { dirty = true; const output = select(`[data-value="${event.target.name}"]`); if (output) output.textContent = event.target.value; status('设置已修改，记得保存'); });
+
+    for (const btn of panel.querySelectorAll('[data-toggle-pw]')) btn.onclick = () => {
+        const input = select(`[name="${btn.dataset.togglePw}.key"]`);
+        if (input) input.type = input.type === 'password' ? 'text' : 'password';
+    };
+    for (const btn of panel.querySelectorAll('[data-effort-pick]')) btn.onclick = () => {
+        const effortSelect = select('[name="summary.effort"]');
+        if (!effortSelect) return;
+        effortSelect.value = btn.dataset.effortPick;
+        syncEffortPills(effortSelect.value);
+        setDirty(true); status('设置已修改，记得保存');
+    };
+    select('[name="summary.effort"]')?.addEventListener('change', event => syncEffortPills(event.target.value));
+
+    select('[data-settings]').addEventListener('input', event => {
+        setDirty(true);
+        const output = select(`[data-value="${event.target.name}"]`);
+        if (output) output.textContent = event.target.value;
+        if (['keep', 'mode'].includes(event.target.name)) syncRuleVisuals();
+        status('设置已修改，记得保存');
+    });
+    select('[data-settings]').addEventListener('change', event => {
+        if (event.target.name === 'mode') syncRuleVisuals();
+    });
     select('[data-settings]').onsubmit = event => { event.preventDefault(); action(async () => { const rawSearch = select('[data-raw-search]').checked; fill((await runtime.saveConfig(readConfig())).config); settings().rawSearch = rawSearch; select('[data-raw-search]').checked = rawSearch; getContext().saveSettingsDebounced(); status('设置已保存'); }); };
+
     for (const button of panel.querySelectorAll('[data-models], [data-check]')) button.onclick = async () => {
         const provider = button.dataset.models || button.dataset.check, node = select(`[data-provider-status="${provider}"]`);
         const buttons = [...panel.querySelectorAll(`[data-models="${provider}"], [data-check="${provider}"]`)];
@@ -190,11 +317,15 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         } catch (error) { node.textContent = error.message; }
         finally { buttons.forEach(item => { item.disabled = false; }); }
     };
+
     for (const tab of panel.querySelectorAll('[data-tab]')) tab.onclick = () => {
+        activeTab = tab.dataset.tab;
         for (const item of panel.querySelectorAll('[data-tab]')) item.setAttribute('aria-pressed', String(item === tab));
         for (const viewNode of panel.querySelectorAll('[data-view]')) viewNode.hidden = viewNode.dataset.view !== tab.dataset.tab;
+        syncTabPill(false);
         if (tab.dataset.tab === 'memories') return refreshMemories().catch(error => status(error.message));
     };
+
     const commands = {
         close, connect: async () => { const data = await runtime.connect(); if (!dirty) fill(data.config); status('服务器已连接'); },
         defaults: () => {
@@ -202,7 +333,8 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
             for (const input of panel.querySelectorAll('[name="mode"]')) input.checked = input.value === DEFAULTS.mode;
             for (const key of ['autoHide', 'citations', 'recallExcludeRaw', 'recallShortContext']) select(`[name="${key}"]`).checked = DEFAULTS[key];
             select('[data-raw-search]').checked = false;
-            dirty = true; status('已恢复默认规则，点击保存生效');
+            syncRuleVisuals();
+            setDirty(true); status('已恢复默认规则，点击保存生效');
         },
         sync: async () => { await runtime.sync(); await refreshMemories(); }, pause: async () => renderState(await runtime.request('pause', { paused: !paused })),
         retry: async () => { const target = runtime.target; await runtime.sync({ target }); renderState(await runtime.request('retry', {}, target)); },
@@ -215,6 +347,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     };
     for (const button of panel.querySelectorAll('[data-action]')) button.onclick = () => ['close', 'defaults', 'import'].includes(button.dataset.action)
         ? commands[button.dataset.action]() : action(commands[button.dataset.action]);
+
     select('[data-import]').onchange = event => action(async () => {
         try {
             const file = event.target.files[0]; if (!file) return;
@@ -226,6 +359,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
     });
     select('[data-filter]').onsubmit = event => { event.preventDefault(); filter = { query: event.target.elements.query.value, kind: event.target.elements.kind.value, order: event.target.elements.order.value }; offset = 0; action(refreshMemories); };
     select('[data-search]').onsubmit = event => { event.preventDefault(); action(async () => { const target = runtime.target; await runtime.sync({ target }); const data = await runtime.request('search', { query: event.target.elements.query.value }, target); select('[data-results]').textContent = data.matches.map(m => `第 ${m.floor} 楼 · ${m.name}\n${m.text}`).join('\n\n') || '没有命中'; }); };
+
     getContext().eventSource.on(getContext().eventTypes.CHAT_CHANGED, () => { offset = 0; notice = ''; listSignature = ''; refreshSequence++; drafts.clear(); select('[data-enabled]').checked = !!runtime.enabled; renderState({}); select('[data-chat]').textContent = getContext().chatId || '请打开一段聊天'; select('[data-memories]').replaceChildren(); select('[data-preview]').replaceChildren(); select('[data-used]').textContent = '尚未生成'; select('[data-results]').textContent = ''; if (panel.open && getContext().chatId) refreshMemories().catch(error => status(error.message)); });
     const poll = host.setInterval(async () => {
         const counts = runtime.session?.data?.counts;
@@ -237,7 +371,7 @@ ${providers.map(([key, title, hint]) => `<fieldset class="lm-card"><legend>${tit
         } catch (error) { status(error.message); }
         finally { polling = false; }
     }, 4000);
-    const dispose = () => { host.clearInterval(poll); disposeCitations(); panel.remove(); launcher.remove(); };
+    const dispose = () => { host.clearInterval(poll); navObserver?.disconnect(); disposeCitations(); panel.remove(); launcher.remove(); };
     host.addEventListener('beforeunload', () => host.clearInterval(poll));
     fill(DEFAULTS);
     action(async () => { const data = await runtime.connect(); if (!dirty) fill(data.config); status('服务器已连接'); if (getContext().chatId && runtime.enabled) await runtime.request('state'); });

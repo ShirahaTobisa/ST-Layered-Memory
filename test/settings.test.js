@@ -257,3 +257,43 @@ test('reopening on memories tab syncs enabled toggle, refreshes list, and handle
     assert.equal(listCalls, before + 1);
     panel.dispose(); h.dom.window.close();
 });
+
+test('upgraded controls sync effort pills, layer visualizer, password toggle, dirty indicator, and optimistic switch', async () => {
+    const h = harness();
+    let releaseEdit;
+    const base = h.host.fetch;
+    const item = { id: 'm1', no: 7, kind: 'summary', turn: 1, summary: '测试记忆', enabled: true, indexed: true, originalChars: 1000, summaryChars: 100, sources: [] };
+    h.host.fetch = (url, init) => {
+        if (url.endsWith('/list')) return Promise.resolve(Response.json({ revision: 'r1', items: [item], filteredTotal: 1, total: 1, counts: {} }));
+        if (url.endsWith('/edit')) return new Promise(resolve => { releaseEdit = () => resolve(Response.json({ revision: 'r1', counts: {} })); });
+        return base(url, init);
+    };
+    const panel = mountMemoryPanel(() => h.context, h.host);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    // Effort pill click updates underlying select and marks dirty.
+    panel.panel.querySelector('[data-effort-pick="low"]').onclick();
+    assert.equal(panel.panel.querySelector('[name="summary.effort"]').value, 'low');
+    assert.equal(panel.panel.querySelector('[data-effort-pick="low"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(panel.panel.querySelector('[data-dirty-dot]').hidden, false);
+    // Password eye toggle switches input type cleanly.
+    const keyInput = panel.panel.querySelector('[name="summary.key"]');
+    assert.equal(keyInput.type, 'password');
+    panel.panel.querySelector('[data-toggle-pw="summary"]').onclick();
+    assert.equal(keyInput.type, 'text');
+    // Keep slider updates live 3-layer visualizer widths.
+    const keepInput = panel.panel.querySelector('[name="keep"]');
+    keepInput.value = '40';
+    keepInput.dispatchEvent(new h.dom.window.Event('input', { bubbles: true }));
+    assert.equal(panel.panel.querySelector('[data-layer-seg="raw"]').style.width, '50%');
+    // Optimistic memory switch flips immediately while request is still in flight.
+    await panel.panel.querySelector('[data-tab="memories"]').onclick();
+    assert.equal(panel.panel.querySelector('[data-nav-count]').textContent, '1');
+    const toggle = panel.panel.querySelector('[data-memories] input[type="checkbox"]');
+    toggle.checked = false; toggle.onchange();
+    assert.equal(toggle.checked, false);
+    assert.equal(panel.panel.querySelector('[data-memories] article').dataset.disabled, 'true');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    releaseEdit?.();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    panel.dispose(); h.dom.window.close();
+});

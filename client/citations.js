@@ -7,6 +7,7 @@ export function mountCitations(getContext, runtime, host = window) {
     const close = () => { sequence++; if (dialog.open) dialog.close(); };
     dialog.querySelector('button').onclick = close;
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
+    dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
     const render = id => {
         const roots = Number.isInteger(Number(id)) && id !== undefined
             ? document.querySelectorAll(`#chat .mes[is_user="false"][mesid="${Number(id)}"] .mes_text`)
