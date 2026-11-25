@@ -7,7 +7,7 @@ $manifest = Get-Content -Raw -LiteralPath (Join-Path $product 'manifest.json') |
 if ($manifest.version -ne $version) { throw 'Manifest version mismatch' }
 $entries = @()
 foreach ($kind in @('frontend', 'server')) {
-    $names = @('README.md', 'SPEC.md', 'ACCEPTANCE.md', 'NOTICE.md', 'LICENSE')
+    $names = @('README.md', 'PLAN.md', 'SPEC.md', 'ACCEPTANCE.md', 'NOTICE.md', 'LICENSE')
     if ($kind -eq 'frontend') { $names += @('manifest.json', 'client', 'shared') }
     else { $names += @('package.json', 'package-lock.json', 'server', 'shared') }
     foreach ($name in $names) {

@@ -1,0 +1,16 @@
+[
+  {
+    "source": "codex-before",
+    "reopenedTwice": true,
+    "summaryPreserved": true,
+    "vectorPreserved": true,
+    "pendingModelCalls": 0
+  },
+  {
+    "source": "gemini-base",
+    "reopenedTwice": true,
+    "summaryPreserved": true,
+    "vectorPreserved": true,
+    "pendingModelCalls": 0
+  }
+]

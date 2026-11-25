@@ -416,3 +416,106 @@ test('a chat with its memory off is not handed over; the switch is saved before 
     await assert.rejects(h.runtime.setEnabled(true), /page closed/);
     assert.equal(saved.enabled, true); assert.equal(h.runtime.enabled, true); assert.equal(handoffs(), 1);
 });
+
+test('LAN HTTP without crypto.subtle uses pure-JS SHA-256 fallback to avoid re-uploading unchanged chats', async () => {
+    const { createHash } = await import('node:crypto');
+    const { sha256Fallback } = await import('../client/runtime.js');
+    for (const sample of ['', 'hello', '分层记忆中文测试：' + '长文本'.repeat(40)]) {
+        assert.equal(sha256Fallback(new TextEncoder().encode(sample)), createHash('sha256').update(sample).digest('hex'));
+    }
+    const h = harness();
+    h.host.crypto = { randomUUID: () => crypto.randomUUID() }; // no crypto.subtle
+    await h.runtime.sync();
+    const first = h.requests.find(r => r.url.endsWith('/sync')).body.messages, base = h.host.fetch;
+    const { storedMessage } = await import('../shared/model.js');
+    const held = createHash('sha256').update(JSON.stringify(first.map(storedMessage))).digest('hex');
+    h.host.fetch = async (url, init) => url.endsWith('/state') ? Response.json({ revision: held, counts: {} }) : base(url, init);
+    await h.events.emit('CHAT_CHANGED');
+    const state = await h.runtime.sync();
+    assert.equal(h.requests.filter(r => r.url.endsWith('/sync')).length, 1);
+    assert.equal(state.revision, held);
+});
+
+test('held turn calculation respects system barriers just like turnsFrom', async () => {
+    const h = harness();
+    h.ctx.chat = [
+        { name: 'User', is_user: true, mes: 't1' },
+        { name: 'Alice', is_user: false, mes: 'a1' },
+        { name: 'User', is_user: true, mes: 't2' },
+        { name: 'Alice', is_user: false, mes: 'a2' },
+        { name: 'User', is_user: true, mes: 't3' },
+        { name: 'Alice', is_system: true, mes: 'tool', extra: { tool_invocations: [{ name: 't' }] } },
+        { name: 'Alice', is_user: false, mes: 'orphan after tool' },
+    ];
+    await h.runtime.sync();
+    const sent = h.requests.at(-1).body.messages;
+    // Only 2 complete turns exist (t1/a1 and t2/a2), so both a1 and a2 must be held.
+    assert.equal(sent[1].held, true);
+    assert.equal(sent[3].held, true);
+    assert.equal(sent[6].held, undefined);
+});
+
+test('both runtime prompt paths restore automatically hidden inputs without sending the local flag to the server', async () => {
+    for (const normal of [false, true]) {
+        const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
+        h.ctx.chat.push({ name: 'User', is_user: true, mes: '现在呢' }, { name: 'Alice', is_user: false, mes: '现在的回复' });
+        await h.runtime.sync();
+        const [user, assistant] = h.ctx.chat;
+        user.is_system = assistant.is_system = true;
+        user.extra[KEY].autoHidden = assistant.extra[KEY].autoHidden = true;
+        const memory = { id: 'summary', kind: 'summary', turn: 1, ids: [user.extra[KEY].id, assistant.extra[KEY].id], sourceAssistantIds: [assistant.extra[KEY].id], summary: '旧轮总结' };
+        const base = h.host.fetch;
+        h.host.fetch = (url, init) => url.endsWith('/plan') ? Promise.resolve(Response.json({ summaries: [memory] })) : base(url, init);
+        let messages = h.ctx.chat.slice(2).map(m => ({ role: m.is_user ? 'user' : 'assistant', content: m.mes }));
+        if (normal) {
+            const history = h.ctx.chat.slice(2).map((m, index) => ({ ...m, index }));
+            await h.host.layeredMemoryInterceptor(history, 10000, () => {}, 'normal');
+            await h.events.emit('WORLDINFO_ENTRIES_LOADED');
+            messages = history.map(m => ({ role: m.is_user ? 'user' : 'assistant', content: m.mes }));
+        }
+        const body = { type: 'normal', messages };
+        await h.events.emit('CHAT_COMPLETION_SETTINGS_READY', body);
+        assert.deepEqual(body.messages.slice(0, 2).map(m => m.content), ['hello', '旧轮总结']);
+        assert.ok(!JSON.stringify(h.requests.filter(r => r.url.endsWith('/sync'))).includes('autoHidden'));
+    }
+});
+
+test('holding the newest two turns respects system-message boundaries', async () => {
+    const h = harness();
+    h.ctx.chat.push({ name: 'User', is_user: true, mes: '没有配对的输入' },
+        { name: 'SillyTavern System', is_system: true, mes: '边界' }, { name: 'Alice', is_user: false, mes: '没有配对的回复' },
+        { name: 'User', is_user: true, mes: '第二轮' }, { name: 'Alice', is_user: false, mes: '第二轮回复' },
+        { name: 'User', is_user: true, mes: '第三轮' }, { name: 'Alice', is_user: false, mes: '第三轮回复' });
+    await h.runtime.sync();
+    assert.deepEqual(h.runtime.session.messages.filter(m => m.held).map(m => m.text), ['第二轮回复', '第三轮回复']);
+});
+
+test('undefined message text is not falsely treated as protected and wrapped .mes nodes sync is_system', async () => {
+    const h = harness(); h.ctx.extensionSettings[KEY].enabled = true;
+    h.ctx.chat[1].mes = undefined;
+    h.ctx.chat.push({ name: 'User', is_user: true, mes: '新问题' }, { name: 'Alice', is_user: false, mes: '新回复' });
+    const attrs = new Map();
+    const fakeNode = { getAttribute: k => k === 'mesid' ? '0' : attrs.get(k), setAttribute: (k, v) => attrs.set(k, v) };
+    h.host.document = { querySelectorAll: selector => selector === '#chat .mes[mesid]' ? [fakeNode] : [] };
+    const base = h.host.fetch;
+    let planMemory;
+    h.host.fetch = async (url, init) => {
+        if (url.endsWith('/status')) return Response.json({ version: VERSION, config: { keep: 2, autoHide: true, citations: false } });
+        if (url.endsWith('/sync')) return Response.json({ revision: 'r1', counts: {}, total: 1, covered: [[1, 1]] });
+        if (url.endsWith('/state')) return Response.json({ revision: 'r1', counts: {}, total: 1, covered: [[1, 1]] });
+        if (url.endsWith('/plan')) return Response.json({ summaries: [planMemory] });
+        return base(url, init);
+    };
+    await h.runtime.sync();
+    // Apply state to trigger tidy() on wrapped #chat .mes[mesid] node.
+    await h.runtime.request('state');
+    assert.equal(attrs.get('is_system'), 'true');
+    // Un-hide so turn 1 stays visible and verify mes === undefined on assistant does NOT falsely mark it protected.
+    h.ctx.chat[0].is_system = false; h.ctx.chat[1].is_system = false;
+    delete h.ctx.chat[0].extra[KEY].autoHidden; delete h.ctx.chat[1].extra[KEY].autoHidden;
+    planMemory = { id: 's1', kind: 'summary', turn: 1, ids: [h.ctx.chat[0].extra[KEY].id, h.ctx.chat[1].extra[KEY].id], sourceAssistantIds: [h.ctx.chat[1].extra[KEY].id], summary: '空原文总结' };
+    const history = h.ctx.chat.map((m, idx) => ({ ...m, mes: m.mes ?? '' }));
+    await h.host.layeredMemoryInterceptor(history, 10000, () => {}, 'normal');
+    await h.events.emit('WORLDINFO_ENTRIES_LOADED');
+    assert.equal(history[1].mes, '空原文总结');
+});

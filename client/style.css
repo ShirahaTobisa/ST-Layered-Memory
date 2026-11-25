@@ -45,3 +45,12 @@
 #layered-memory [data-preview] > p + p { margin-top: 10px; padding-top: 10px; border-top: var(--lm-line); }
 #layered-memory [data-page] { text-align: center; }
 #layered-memory [hidden] { display: none; }
+
+#layered-memory progress { width: 100%; height: 7px; accent-color: var(--lm-accent); }
+.lm-citation { padding: 0 3px; border: 0; background: transparent; color: var(--SmartThemeQuoteColor); font: inherit; font-size: .8em; cursor: pointer; }
+.lm-citation:is(:hover, :focus-visible) { text-decoration: underline; }
+.lm-citation-dialog { width: min(620px, 92vw); max-height: 80dvh; overflow: auto; padding: 20px; border: 1px solid var(--SmartThemeBorderColor); border-radius: 8px; color: var(--SmartThemeBodyColor); background: var(--SmartThemeBlurTintColor); backdrop-filter: blur(20px); }
+.lm-citation-dialog::backdrop { background: rgb(0 0 0 / 60%); }
+.lm-citation-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.lm-citation-dialog :is(p, details div) { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.lm-citation-dialog button { cursor: pointer; color: inherit; background: transparent; border: 1px solid var(--SmartThemeBorderColor); border-radius: 4px; padding: 4px 10px; }

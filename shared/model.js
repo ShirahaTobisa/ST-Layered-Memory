@@ -1,8 +1,9 @@
 export const KEY = 'layered_memory';
-export const VERSION = '0.2.5';
+export const VERSION = '0.2.8';
 export const MAIN_TYPES = new Set(['normal', 'regenerate', 'swipe', 'continue']);
 export const DEFAULTS = {
     version: 2, mode: 'classic', keep: 20, autoHide: true, concurrency: 5, rawLimit: 5,
+    recallLimit: 10, recallThreshold: 0.48, recallExcludeRaw: true, rerankThreshold: 0, recallShortContext: true, citations: true,
     summary: { url: '', model: '', key: '', effort: '' },
     embedding: { url: '', model: '', key: '' },
     rerank: { url: '', model: '', key: '' },
@@ -10,6 +11,7 @@ export const DEFAULTS = {
 export const PROVIDERS = ['summary', 'embedding', 'rerank'];
 // How hard the summary model is told to think (reasoning_effort); with none chosen the request says nothing about it.
 export const EFFORTS = { '': '不指定', none: '关闭', minimal: '最低', low: '低', medium: '中', high: '高' };
+export const stripCitations = text => String(text || '').replace(/\[M[1-9]\d*\]/g, '');
 
 // SillyTavern also uses is_system for hidden ordinary dialogue.
 export function memoryRole(message) {
@@ -51,7 +53,7 @@ export const storedMessage = m => ({ id: m.id, role: m.role, name: String(m.name
 export const stripVector = ({ vector, vectorSignature, embeddingQ, embeddingDims, embeddingScale, embeddingEncoding, ...memory }) => memory;
 
 export function cleanMemory(memory) {
-    const summary = cleanText(memory.summary);
+    const summary = cleanText(stripCitations(memory.summary));
     const userText = memory.userText === undefined ? undefined : cleanText(memory.userText);
     if (summary === memory.summary && userText === memory.userText) return memory;
     return { ...stripVector(memory), summary, ...(userText === undefined ? {} : { userText }) };
@@ -71,7 +73,7 @@ export function floorsFrom(messages) {
 export const roleText = (messages, clean = true) => {
     const names = new Set(messages.map(m => m.name).filter(Boolean));
     return messages.map(m => {
-        const text = clean ? cleanText(m.text) : m.text || '';
+        const text = clean ? cleanText(m.role === 'assistant' ? stripCitations(m.text) : m.text) : m.text || '';
         return text ? `${names.size > 1 ? `${m.name || m.role}：` : ''}${text}` : '';
     }).filter(Boolean).join('\n\n');
 };
@@ -151,6 +153,18 @@ export function eligibleGroups(turns, memories, existing = []) {
         if (open.push(turn) === 5) close();
     }
     return groups;
+}
+
+// Collapses a set of covered turn numbers into compact contiguous [first, last] runs.
+export function turnRanges(numbers) {
+    const sorted = [...new Set(numbers.filter(Number.isInteger))].sort((a, b) => a - b);
+    const ranges = [];
+    for (const n of sorted) {
+        const last = ranges.at(-1);
+        if (last && n === last[1] + 1) last[1] = n;
+        else ranges.push([n, n]);
+    }
+    return ranges;
 }
 
 export function assertNumber(value, min, max, name) {

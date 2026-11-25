@@ -114,7 +114,7 @@ test('v0.1 database upgrade preserves edited summaries, disabled merged memories
     const turns = sourceTurns(store.chat(id).messages);
     const oldSummaries = store.memories(id).filter(m => m.kind === 'summary').map(memory => {
         const index = memory.turn - 1, turn = turns[index];
-        const { sourceUserIds, sourceAssistantIds, recipe, ...old } = memory;
+        const { sourceUserIds, sourceAssistantIds, recipe, no, ...old } = memory;
         return { ...old, id: hash(turn.ids), sourceHash: hash(turns.slice(Math.max(0, index - 3), index + 1).map(sourceData)),
             ...(index === 0 ? { summary: '旧版手动编辑必须保留', edited: true } : {}) };
     });
@@ -246,7 +246,7 @@ test('unknown sources and protected user attachments cannot be removed by a grou
     assert.deepEqual(compressHistory(history.map(({ id, ...m }) => m), source, { summaries: [{ ...summary, sourceAssistantIds: undefined }] }, 2, true).used, []);
 });
 
-test('retrieval includes recent memories and falls back to summaries on vector failure; raw search finds omitted detail', async t => {
+test('retrieval respects raw-window exclusion by default, supports including recent memories, and falls back on vector failure', async t => {
     const { store } = fixture(t), id = scopeId(scope), data = messages(3);
     data[1].text += '遗失钥匙藏在灯塔';
     store.setConfig({ mode: 'enhanced', embedding: { url: 'http://model.local/v1', model: 'embedding' } });
@@ -255,10 +255,17 @@ test('retrieval includes recent memories and falls back to summaries on vector f
     store.edit(id, memories[0].id, { summary: '约好明天去灯塔' });
     store.edit(id, memories[1].id, { summary: '灯塔的风很大' });
     await settle(new Engine(store, provider));
+    // With default recallExcludeRaw=true, all 3 turns are in keep=20 raw window so recall does not duplicate them.
+    assert.equal((await recall(store, id, '灯塔', provider)).memories.length, 0);
+    store.setConfig({ recallExcludeRaw: false });
     const result = await recall(store, id, '灯塔', provider);
     assert.equal(result.memories.length, 3); assert.equal(result.memories.at(-1).turn, 3);
     const failed = await recall(store, id, '灯塔', { embed: async () => { throw new Error('failure'); } });
-    assert.equal(failed.memories.length, 0); assert.ok(failed.warnings.length);
+    // Embedding failure falls back to strict lexical matches with warning, while noisy queries stay empty.
+    assert.equal(failed.memories.length, 2); assert.ok(failed.warnings.length);
+    assert.ok(failed.memories.every(m => m.score === undefined && m.why.includes('关键词命中')));
+    const failedNoMatch = await recall(store, id, '完全无关的查询词', { embed: async () => { throw new Error('failure'); } });
+    assert.equal(failedNoMatch.memories.length, 0); assert.ok(failedNoMatch.warnings.length);
     assert.match(rawSearch(store.chat(id).messages, '钥匙')[0].text, /钥匙藏在灯塔/);
 });
 
@@ -598,7 +605,7 @@ test('summaries are written from the text the main model was shown; a changed vi
 
 test('a rerank model picks the recalled memories when more candidates are found than fit', async t => {
     const { store } = fixture(t), id = scopeId(scope);
-    store.setConfig({ mode: 'enhanced', embedding: { url: 'http://local/v1', model: 'embedding' } });
+    store.setConfig({ mode: 'enhanced', recallExcludeRaw: false, embedding: { url: 'http://local/v1', model: 'embedding' } });
     store.sync(scope, messages(14), null); await settle(new Engine(store, provider));
     const asked = [], ranked = { ...provider, rerank: async (config, query, documents) => { asked.push([query, documents]); return documents.map((_, index) => index); } };
     assert.deepEqual((await recall(store, id, '问题', ranked)).memories.map(m => m.turn), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -607,10 +614,15 @@ test('a rerank model picks the recalled memories when more candidates are found 
     assert.deepEqual(picked.memories.map(m => m.turn), [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     assert.equal(asked.length, 1); assert.equal(asked[0][0], '问题'); assert.equal(asked[0][1].length, 14);
     assert.match(asked[0][1][0], /^用户原输入：\n用户问题 0\n\n本轮总结：\n/);
+    // rerankThreshold filters out low-scoring reranked candidates.
+    store.setConfig({ rerankThreshold: 0.5 });
+    const cutoff = await recall(store, id, '问题', { ...provider, rerank: async (_, __, docs) => docs.map((_, i) => i >= 11 ? 0.8 : 0.1) });
+    assert.deepEqual(cutoff.memories.map(m => m.turn), [12, 13, 14]);
+    store.setConfig({ rerankThreshold: 0 });
     const failed = await recall(store, id, '问题', { ...provider, rerank: async () => { throw new Error('down'); } });
     assert.deepEqual(failed.memories.map(m => m.turn), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]); assert.match(failed.warnings[0], /重排失败/);
     assert.equal(publicConfig(store.config).rerank.hasKey, true); assert.ok(!JSON.stringify(publicConfig(store.config)).includes('rerank-secret'));
-    const p = new Providers(async (url, init) => { assert.match(url, /\/v1\/rerank$/); assert.equal(JSON.parse(init.body).top_n, 2); return Response.json({ results: [{ index: 1, relevance_score: 0.9 }, { index: 0, relevance_score: 0.2 }] }); });
+    const p = new Providers(async (url, init) => { assert.match(url, /\/v1\/rerank$/); assert.equal(JSON.parse(init.body).top_n, 2); return Response.json({ results: [{ index: 1, score: 0.9 }, { index: 0, relevance_score: 0.2 }] }); });
     assert.deepEqual(await p.rerank(store.config, '问', ['甲', '乙']), [0.2, 0.9]);
     await assert.rejects(new Providers(async () => Response.json({ results: [] })).rerank(store.config, '问', ['甲']), /有效分数/);
 });
@@ -651,4 +663,181 @@ test('a chosen thinking level goes out with summary and test requests; with none
     assert.equal(store.setConfig({ summary: { effort: '' } }).summary.effort, '');
     assert.throws(() => store.setConfig({ summary: { effort: 'extreme' } }), /思考强度/);
     assert.match((await check({ effort: ['low'] })).error, /思考强度/);
+});
+
+test('empty view is respected by shownText and multimodal user messages receive recall as a text part', async t => {
+    const { store } = fixture(t), data = messages(1);
+    data[0] = { ...data[0], text: '<status>only status</status>', view: '' };
+    const inputs = [];
+    const engine = new Engine(store, { ...provider, summarize: async (_, input) => { inputs.push(input); return '总结'; } });
+    store.sync(scope, data, null); await settle(engine);
+    assert.equal(inputs[0].contextTurns[0].user, '');
+    const multimodal = [
+        { role: 'user', content: '上一轮文字' },
+        { role: 'assistant', content: '上一轮回复' },
+        { role: 'user', content: [{ type: 'text', text: '看看这张图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }] },
+    ];
+    const recalled = appendRecall(multimodal, [{ turn: 1, score: 0.9, userText: '问', summary: '记忆' }]);
+    assert.equal(recalled.messages[0].content, '上一轮文字');
+    assert.equal(recalled.messages[2].content.length, 3);
+    assert.equal(recalled.messages[2].content[2].type, 'text');
+    assert.match(recalled.messages[2].content[2].text, /<enhanced_memory_recall>/);
+    // Keyword-only fallback memory without vector score omits similarity attribute instead of rendering NaN%.
+    const kwOnly = appendRecall([{ role: 'user', content: 'hi' }], [{ turn: 2, userText: '问', summary: '记忆' }]);
+    assert.ok(!kwOnly.messages[0].content.includes('NaN'));
+    // Fallback buildPrompt path also supports multimodal user messages without bailing out.
+    const src = messages(2), turns = sourceTurns(src);
+    const fallbackOut = await buildPrompt(
+        [...src.map(m => ({ role: m.role, content: m.text })),
+            { role: 'user', content: [{ type: 'text', text: '看看图' }, { type: 'image_url', image_url: { url: 'x' } }] }],
+        src, [], { summaries: [{ id: turns[0].key, kind: 'summary', turn: 1, ids: turns[0].ids, summary: '旧总结' }], groups: [], recall: [{ turn: 1, userText: '问', summary: '召回' }] },
+        { ...DEFAULTS, keep: 2 }, async text => text.length, 10000
+    );
+    assert.equal(fallbackOut.messages[1].content, '旧总结');
+    assert.equal(fallbackOut.messages[4].content.length, 3);
+    assert.match(fallbackOut.messages[4].content[2].text, /<enhanced_memory_recall>/);
+});
+
+test('hybrid retrieval fuses lexical exact hits and enriches short queries with preceding context', async t => {
+    const { store } = fixture(t), id = scopeId(scope), data = messages(15);
+    store.setConfig({ mode: 'enhanced', keep: 10, recallThreshold: 0.48, embedding: { url: 'http://local/v1', model: 'embedding' } });
+    store.sync(scope, data, null);
+    let idx = 0;
+    const embedVectors = texts => texts.map(() => {
+        const i = idx++;
+        return i === 1 ? [0.4, 0.9165, 0] : [0.05, 0.9987, 0];
+    });
+    const engine = new Engine(store, {
+        summarize: async (_, input) => input.memory.turn === 2 ? '约定暗号星辉7419并藏好钥匙' : `普通日常第 ${input.memory.turn} 轮`,
+        embed: async (_, texts) => embedVectors(texts),
+    });
+    await settle(engine);
+    // Query vector [1, 0, 0]: turn 2 has cosine ~0.40 (below 0.48 threshold!), but exact keyword '星辉7419' rescues it via hybrid RRF.
+    const seenQueries = [];
+    const recalled = await recall(store, id, '星辉7419', {
+        embed: async (_, texts) => { seenQueries.push(texts[0]); return [[1, 0, 0]]; },
+    }, { shortContext: '她在地下室门口低声提醒你密码' });
+    assert.equal(recalled.memories.length, 1);
+    assert.equal(recalled.memories[0].turn, 2);
+    assert.ok(recalled.memories[0].why.includes('关键词命中'));
+    assert.match(seenQueries[0], /地下室门口[\s\S]*星辉7419/);
+    // Common 2-char word overlap ('今天') must NOT pull irrelevant car-repair logs when query is about dinner.
+    store.edit(id, store.memories(id).find(m => m.turn === 3).id, { summary: '今天去修车，花了三百元换轮胎' });
+    const noisy = await recall(store, id, '今天晚餐吃什么', { embed: async () => [[0, 0, 1]] });
+    assert.equal(noisy.memories.length, 0);
+    // Even before indexing / when embedding fails, exact proper noun still recalls cleanly.
+    store.clearEmbeddings(id);
+    const unindexed = await recall(store, id, '星辉7419', { embed: async () => { throw new Error('should not even be needed'); } });
+    assert.equal(unindexed.memories.length, 1);
+    assert.equal(unindexed.memories[0].turn, 2);
+});
+
+test('transient 429 errors retry with backoff while 400 and timeouts fail immediately; upstream details redact keys', async t => {
+    const { store } = fixture(t), id = scopeId(scope);
+    store.setConfig({ summary: { url: 'http://local/v1', model: 'summary', key: 'sk-super-secret-key' } });
+    store.sync(scope, messages(1), null);
+    let calls = 0;
+    const flaky = new Providers(async () => {
+        calls++;
+        if (calls < 3) return new Response(JSON.stringify({ error: { message: 'rate limited for sk-super-secret-key' } }), { status: 429 });
+        return Response.json({ choices: [{ message: { content: '重试后成功' } }] });
+    });
+    const engine = new Engine(store, flaky, { retryBaseMs: 15 });
+    engine.wake();
+    for (let i = 0; i < 100 && !store.memories(id).length; i++) await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(calls, 3);
+    assert.equal(store.memories(id)[0]?.summary, '重试后成功');
+    await engine.close();
+    // Retry-After header is parsed and bounded; non-retryable 400 fails immediately with sanitized upstream error (no secret leaked).
+    const retryAfterProvider = new Providers(async () => new Response('slow down', { status: 429, headers: { 'retry-after': '2' } }));
+    await assert.rejects(retryAfterProvider.request(store.config.summary, 'chat/completions', {}), error => {
+        assert.equal(error.retryable, true);
+        assert.equal(error.retryAfter, 2000);
+        return true;
+    });
+    const bad = new Providers(async () => new Response(JSON.stringify({ error: { message: 'invalid model with sk-super-secret-key' } }), { status: 400 }));
+    await assert.rejects(bad.request(store.config.summary, 'chat/completions', {}), error => {
+        assert.equal(error.retryable, false);
+        assert.match(error.message, /HTTP 400.*invalid model/);
+        assert.ok(!error.message.includes('sk-super-secret-key'));
+        return true;
+    });
+});
+
+test('embeddings migrate into dedicated BLOB table and survive rename and branch inheritance', async t => {
+    const { store, filename } = fixture(t), id = scopeId(scope), data = messages(2);
+    store.setConfig({ mode: 'enhanced', embedding: { url: 'http://local/v1', model: 'embedding' } });
+    store.sync(scope, data, null);
+    await settle(new Engine(store, provider));
+    // Verify vectors live in embeddings table, not inside memories.data JSON.
+    const rawRow = store.db.prepare('SELECT data FROM memories WHERE chat_id=? LIMIT 1').get(id);
+    assert.ok(!rawRow.data.includes('embeddingQ'));
+    assert.equal(store.embeddings(id, vectorSignature(store.config)).size, 2);
+    // Branch inherits embeddings without re-embedding.
+    const branch = { ...scope, chat: 'branch-emb' };
+    store.sync(branch, data, null, scope.chat);
+    assert.equal(store.state(scopeId(branch)).indexed, 2);
+    assert.equal(store.state(scopeId(branch)).counts.queued || 0, 0);
+    // Rename cascades embeddings to new chat id.
+    const renamed = { ...scope, chat: 'renamed-emb' };
+    store.move(scope.actor, scope.chat, renamed.chat);
+    assert.equal(store.state(scopeId(renamed)).indexed, 2);
+    // Legacy inline embeddingQ JSON migrates cleanly on reopen without re-embedding.
+    const mem = store.memories(scopeId(renamed))[0];
+    store.clearEmbeddings(scopeId(renamed));
+    const legacyBlob = { ...mem, ...packEmbedding([0.5, 0.5, 0]), vectorSignature: vectorSignature(store.config) };
+    store.db.prepare('UPDATE memories SET data=? WHERE chat_id=? AND id=?').run(JSON.stringify(legacyBlob), scopeId(renamed), mem.id);
+    store.close();
+    const reopened = new Store(filename);
+    try {
+        assert.equal(reopened.embeddings(scopeId(renamed), vectorSignature(reopened.config)).size, 1);
+        const migratedRaw = reopened.db.prepare('SELECT data FROM memories WHERE chat_id=? AND id=?').get(scopeId(renamed), mem.id).data;
+        assert.ok(!migratedRaw.includes('embeddingQ'));
+    } finally { reopened.close(); }
+});
+
+test('a slow summary in one chat does not block embedding or merge jobs in another chat', async t => {
+    const { store } = fixture(t);
+    store.setConfig({ mode: 'enhanced', concurrency: 2, embedding: { url: 'http://local/v1', model: 'embedding' } });
+    const chatA = { ...scope, chat: 'slow-a' }, chatB = { ...scope, chat: 'fast-b' };
+    store.sync(chatB, messages(1), null);
+    await settle(new Engine(store, { summarize: async () => 'B总结', embed: async () => { throw new Error('pause'); } }));
+    store.retry(scopeId(chatB)); // chatB now has a queued embedding job
+    store.sync(chatA, messages(1), null); // chatA has a queued summary job
+    let releaseA;
+    const engine = new Engine(store, {
+        summarize: () => new Promise(resolve => { releaseA = resolve; }),
+        embed: async (_, texts) => texts.map(() => [1, 0, 0]),
+    });
+    engine.wake();
+    for (let i = 0; i < 40 && store.state(scopeId(chatB)).indexed < 1; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(store.state(scopeId(chatB)).indexed, 1);
+    releaseA('A总结');
+    await settle(engine);
+    assert.equal(store.state(scopeId(chatA)).summaries, 1);
+});
+
+test('state reports 3-stage progress with ETA and compression stats; provider filters and sorts model lists by role', async t => {
+    const { store } = fixture(t), id = scopeId(scope);
+    store.setConfig({ keep: 10, summary: { url: 'http://local/v1', model: 'summary', key: 'k' } });
+    const data = Array.from({ length: 8 }, (_, i) => [
+        { id: `u${i}`, role: 'user', name: '用户', text: `用户问题 ${i}` },
+        { id: `a${i}`, role: 'assistant', name: '角色', text: '很长的剧情正文。'.repeat(40) + i },
+    ]).flat();
+    store.sync(scope, data, null);
+    const engine = new Engine(store, { summarize: async (_, input) => `精简总结${input.memory.turn}`, embed: async () => [] });
+    await settle(engine);
+    const st = store.state(id);
+    assert.equal(st.progress.length, 3);
+    assert.equal(st.progress[0].kind, 'summary');
+    assert.equal(st.progress[0].done, 8);
+    assert.equal(st.progress[0].total, 8);
+    assert.ok(st.compression.rawChars > st.compression.compressedChars && st.compression.savedPct > 0);
+    // Model list smart filtering/sorting by role
+    const p = new Providers(async () => Response.json({ data: [
+        { id: 'bge-m3' }, { id: 'bge-reranker-v2-m3' }, { id: 'gemini-2.5-flash' }, { id: 'text-embedding-3-small' }, { id: 'gpt-4o-mini' },
+    ] }));
+    assert.deepEqual(await p.models({ url: 'http://local/v1' }, 'summary'), ['gemini-2.5-flash', 'gpt-4o-mini']);
+    assert.deepEqual((await p.models({ url: 'http://local/v1' }, 'embedding')).slice(0, 2), ['bge-m3', 'text-embedding-3-small']);
+    assert.equal((await p.models({ url: 'http://local/v1' }, 'rerank'))[0], 'bge-reranker-v2-m3');
 });

@@ -1,6 +1,6 @@
 import { scopeId, sourceTurns, groupHash, shownText } from './store.js';
 import { configure, hash, publicConfig, vectorSignature, completionText, effort } from './providers.js';
-import { recall, rawSearch, unpackEmbedding } from './search.js';
+import { recall, rawSearch } from './search.js';
 import { VERSION, PROVIDERS, stripVector, cleanText, eligibleGroups } from '../shared/model.js';
 
 function expectedChat(store, body) {
@@ -27,7 +27,7 @@ export function registerRoutes(router, getEngine) {
     route('/models', async (store, body, engine) => {
         if (!PROVIDERS.includes(body.provider)) throw new Error('未知模型类型');
         const setting = configure({ [body.provider]: body.setting || {} }, store.config)[body.provider];
-        return { models: await engine.providers.models(setting) };
+        return { models: await engine.providers.models(setting, body.provider) };
     });
     route('/check', async (store, body, engine) => {
         if (!PROVIDERS.includes(body.provider)) throw new Error('未知模型类型');
@@ -47,8 +47,14 @@ export function registerRoutes(router, getEngine) {
     });
     route('/state', async (store, body) => store.state(scopeId(body.scope)));
     route('/sync', async (store, body) => store.sync(body.scope, body.messages, body.revision, body.parentChat));
-    route('/rename', async (store, body) => { if (!body.to) throw new Error('聊天身份无效'); store.move(body.actor, body.from, body.to); return {}; });
-    route('/forget', async (store, body) => { store.move(body.actor, body.chat); return {}; });
+    route('/rename', async (store, body) => {
+        if (typeof body.actor !== 'string' || !body.actor || typeof body.from !== 'string' || !body.from || typeof body.to !== 'string' || !body.to.trim()) throw new Error('聊天身份无效');
+        store.move(body.actor, body.from, body.to); return {};
+    });
+    route('/forget', async (store, body) => {
+        if (typeof body.actor !== 'string' || !body.actor || typeof body.chat !== 'string' || !body.chat) throw new Error('聊天身份无效');
+        store.move(body.actor, body.chat); return {};
+    });
     route('/pause', async (store, body) => {
         const { id } = expectedChat(store, body); store.pause(id, !!body.paused); return store.state(id);
     });
@@ -60,9 +66,7 @@ export function registerRoutes(router, getEngine) {
     });
     route('/reindex', async (store, body) => {
         const { id } = expectedChat(store, body);
-        store.db.transaction(() => {
-            for (const memory of store.memories(id)) { memory.vectorSignature = null; store.put(id, memory); }
-        })();
+        store.db.transaction(() => { store.clearEmbeddings(id); })();
         store.retry(id);
         return store.state(id);
     });
@@ -72,12 +76,27 @@ export function registerRoutes(router, getEngine) {
     });
     route('/list', async (store, body) => {
         const { id, chat } = expectedChat(store, body);
-        let all = store.memories(id).sort((a, b) => a.turn - b.turn || a.kind.localeCompare(b.kind));
+        const dir = body.order === 'asc' ? 1 : -1;
+        let all = store.memories(id).sort((a, b) => dir * ((a.end || a.turn) - (b.end || b.turn) || a.turn - b.turn) || a.kind.localeCompare(b.kind));
         if (['summary', 'group'].includes(body.kind)) all = all.filter(m => m.kind === body.kind);
         if (body.query) all = all.filter(m => `${m.summary}\n${m.userText || ''}`.includes(String(body.query).slice(0, 300)));
-        const offset = Math.max(0, Number(body.offset) || 0);
-        const items = all.slice(offset, offset + 10).map(m => ({ ...stripVector(m), indexed: m.vectorSignature === vectorSignature(store.config) && !!unpackEmbedding(m).length, sources: chat.messages.filter(source => m.ids.includes(source.id)) }));
+        const maxOffset = Math.max(0, Math.ceil(all.length / 10) - 1) * 10;
+        const offset = Math.min(Math.max(0, Number(body.offset) || 0), maxOffset);
+        const byId = new Map(chat.messages.map(source => [source.id, source]));
+        const vecSig = vectorSignature(store.config);
+        const items = all.slice(offset, offset + 10).map(m => {
+            const sources = (m.ids || []).map(mid => byId.get(mid)).filter(Boolean);
+            const originalChars = sources.reduce((sum, s) => sum + cleanText(s.view ?? s.text).length, 0);
+            return { ...stripVector(m), indexed: m.vectorSignature === vecSig, sources, originalChars, summaryChars: (m.summary || '').length };
+        });
         return { ...store.state(id), items, offset, filteredTotal: all.length };
+    });
+    route('/citation', async (store, body) => {
+        const { id, chat } = expectedChat(store, body);
+        if (!Number.isSafeInteger(body.no) || body.no < 1) throw new Error('记忆编号无效');
+        const number = store.stmts.numberOwner.get(id, body.no);
+        const memory = number && store.memory(id, number.memory_id);
+        return { memory: memory ? stripVector(memory) : null, sources: memory ? chat.messages.filter(m => memory.ids.includes(m.id)) : [] };
     });
     route('/edit', async (store, body) => {
         const { id } = expectedChat(store, body); store.edit(id, body.id, body); return store.state(id);
@@ -85,7 +104,7 @@ export function registerRoutes(router, getEngine) {
     route('/plan', async (store, body, engine) => {
         const { id, revision } = expectedChat(store, body);
         const result = store.config.mode === 'enhanced'
-            ? await recall(store, id, String(body.query || ''), engine.providers)
+            ? await recall(store, id, String(body.query || ''), engine.providers, { shortContext: String(body.shortContext || '').slice(0, 500) })
             : { memories: [], warnings: [] };
         if (store.revision(id) !== revision) throw Object.assign(new Error('检索期间聊天发生变化'), { status: 409 });
         // Read after the search, so summaries that were finished meanwhile are simply included.
@@ -101,11 +120,15 @@ export function registerRoutes(router, getEngine) {
     });
     route('/export', async (store, body) => {
         const { id, chat } = expectedChat(store, body);
-        return { version: 1, scope: chat.scope, revision: chat.revision, memories: store.memories(id).map(stripVector) };
+        return { version: 1, scope: chat.scope, revision: chat.revision, memories: store.memories(id).map(stripVector),
+            numbers: store.db.prepare('SELECT memory_id AS id,no FROM memory_numbers WHERE chat_id=?').all(id) };
     });
     route('/import', async (store, body) => {
         const { id, chat } = expectedChat(store, body), backup = body.backup;
         if (backup?.version !== 1 || !Array.isArray(backup.memories) || backup.memories.length > 20000 || scopeId(backup.scope) !== id) throw new Error('备份不属于当前聊天，未导入');
+        const numbers = backup.numbers ?? [];
+        if (!Array.isArray(numbers) || numbers.some(m => typeof m?.id !== 'string' || !m.id || m.id.length > 128 || !Number.isSafeInteger(m.no) || m.no < 1)
+            || new Set(numbers.map(m => m.id)).size !== numbers.length || new Set(numbers.map(m => m.no)).size !== numbers.length) throw new Error('备份记忆编号无效');
         const allTurns = sourceTurns(chat.messages);
         const turns = new Map(allTurns.filter(t => t.eligible && !t.empty).map(t => [t.key, t]));
         if (backup.memories.some(m => !['summary', 'group'].includes(m?.kind)) || new Set(backup.memories.map(m => m.id)).size !== backup.memories.length) throw new Error('备份记录类型或编号无效，未导入');
@@ -128,7 +151,8 @@ export function registerRoutes(router, getEngine) {
                 sourceHash: groupHash(candidate.children), summary: cleanText(group.summary), enabled: group.enabled !== false };
         });
         store.db.transaction(() => {
-            for (const memory of restored.values()) store.put(id, memory);
+            for (const number of numbers) if (store.number(id, number) !== number.no) throw new Error('备份记忆编号与当前聊天冲突');
+            for (const memory of restored.values()) store.put(id, memory, { clearEmbedding: true });
             for (const group of groups) store.put(id, group);
             store.schedule(id);
         })();

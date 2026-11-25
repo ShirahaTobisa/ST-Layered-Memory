@@ -8,5 +8,5 @@
   "generate_interceptor": "layeredMemoryInterceptor",
   "minimum_client_version": "1.19.0",
   "author": "Mornye",
-  "version": "0.2.5"
+  "version": "0.2.8"
 }
